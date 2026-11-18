@@ -10,6 +10,7 @@ export interface AuthenticatedUser {
   fullName: string;
   role: UserRole;
   phone?: string;
+  isActive: boolean;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -26,15 +27,22 @@ export async function authenticateToken(req: AuthenticatedRequest, res: Response
   }
 
   if (!supabaseAdmin) {
-    const mockUserMatch = req.headers['x-mock-role'] as UserRole | undefined;
-    req.user = {
-      id: 'usr_mock_user',
-      email: mockUserMatch ? `${mockUserMatch}@torsi.id` : 'customer@torsi.id',
-      fullName: mockUserMatch ? `TORSI ${mockUserMatch.toUpperCase()}` : 'Budi Santoso',
-      role: mockUserMatch || 'customer',
-      phone: '+6281234567890',
-    };
-    return next();
+    if (process.env.NODE_ENV === 'test') {
+      const mockRole = req.headers['x-mock-role'] as UserRole | undefined;
+      const validRoles: UserRole[] = ['customer', 'mechanic', 'superadmin'];
+      const role = mockRole && validRoles.includes(mockRole) ? mockRole : 'customer';
+      req.user = {
+        id: `usr_test_${role}`,
+        email: `${role}@test.meltune.id`,
+        fullName: role === 'customer' ? 'Test Customer' : role === 'mechanic' ? 'Test Mechanic' : 'Test Admin',
+        role,
+        phone: '+6281234567890',
+        isActive: true,
+      };
+      return next();
+    }
+    sendError(res, 'Server authentication service not configured. SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required.', 503, 'AUTH_SERVICE_UNAVAILABLE');
+    return;
   }
 
   try {
@@ -46,12 +54,17 @@ export async function authenticateToken(req: AuthenticatedRequest, res: Response
 
     const { data: profile, error: profileErr } = await supabaseAdmin
       .from('profiles')
-      .select('id, full_name, role, phone')
+      .select('id, full_name, role, phone, is_active')
       .eq('id', user.id)
       .single();
 
     if (profileErr || !profile) {
       sendError(res, 'User profile not found', 403, 'PROFILE_NOT_FOUND');
+      return;
+    }
+
+    if (!profile.is_active) {
+      sendError(res, 'Account has been suspended. Please contact support.', 403, 'ACCOUNT_SUSPENDED');
       return;
     }
 
@@ -61,6 +74,7 @@ export async function authenticateToken(req: AuthenticatedRequest, res: Response
       fullName: profile.full_name || '',
       role: profile.role as UserRole,
       phone: profile.phone,
+      isActive: profile.is_active,
     };
 
     next();

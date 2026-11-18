@@ -1,7 +1,7 @@
 {
-  "name": "torsi-be",
+  "name": "meltune-be",
   "version": "1.0.0",
-  "description": "TORSI Automotive Workshop REST API Backend",
+  "description": "MELTUNE AUTO Workshop REST API Backend",
   "main": "dist/app.js",
   "scripts": {
     "dev": "tsx watch src/app.ts",

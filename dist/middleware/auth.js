@@ -12,15 +12,22 @@ async function authenticateToken(req, res, next) {
         return;
     }
     if (!supabase_js_1.supabaseAdmin) {
-        const mockUserMatch = req.headers['x-mock-role'];
-        req.user = {
-            id: 'usr_mock_user',
-            email: mockUserMatch ? `${mockUserMatch}@torsi.id` : 'customer@torsi.id',
-            fullName: mockUserMatch ? `TORSI ${mockUserMatch.toUpperCase()}` : 'Budi Santoso',
-            role: mockUserMatch || 'customer',
-            phone: '+6281234567890',
-        };
-        return next();
+        if (process.env.NODE_ENV === 'test') {
+            const mockRole = req.headers['x-mock-role'];
+            const validRoles = ['customer', 'mechanic', 'superadmin'];
+            const role = mockRole && validRoles.includes(mockRole) ? mockRole : 'customer';
+            req.user = {
+                id: `usr_test_${role}`,
+                email: `${role}@test.meltune.id`,
+                fullName: role === 'customer' ? 'Test Customer' : role === 'mechanic' ? 'Test Mechanic' : 'Test Admin',
+                role,
+                phone: '+6281234567890',
+                isActive: true,
+            };
+            return next();
+        }
+        (0, response_js_1.sendError)(res, 'Server authentication service not configured. SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required.', 503, 'AUTH_SERVICE_UNAVAILABLE');
+        return;
     }
     try {
         const { data: { user }, error } = await supabase_js_1.supabaseAdmin.auth.getUser(token);
@@ -30,11 +37,15 @@ async function authenticateToken(req, res, next) {
         }
         const { data: profile, error: profileErr } = await supabase_js_1.supabaseAdmin
             .from('profiles')
-            .select('id, full_name, role, phone')
+            .select('id, full_name, role, phone, is_active')
             .eq('id', user.id)
             .single();
         if (profileErr || !profile) {
             (0, response_js_1.sendError)(res, 'User profile not found', 403, 'PROFILE_NOT_FOUND');
+            return;
+        }
+        if (!profile.is_active) {
+            (0, response_js_1.sendError)(res, 'Account has been suspended. Please contact support.', 403, 'ACCOUNT_SUSPENDED');
             return;
         }
         req.user = {
@@ -43,6 +54,7 @@ async function authenticateToken(req, res, next) {
             fullName: profile.full_name || '',
             role: profile.role,
             phone: profile.phone,
+            isActive: profile.is_active,
         };
         next();
     }

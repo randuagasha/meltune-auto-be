@@ -3,53 +3,136 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.dashboardRouter = void 0;
 const express_1 = require("express");
 const auth_js_1 = require("../../middleware/auth.js");
+const supabase_js_1 = require("../../config/supabase.js");
 const response_js_1 = require("../../utils/response.js");
 exports.dashboardRouter = (0, express_1.Router)();
-exports.dashboardRouter.get('/admin', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('superadmin'), (_req, res) => {
-    const analytics = {
+exports.dashboardRouter.get('/admin', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('superadmin'), async (_req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const [{ count: totalBookings }, { count: completedBookings }, { count: pendingBookings }, { count: cancelledBookings }, { count: rejectedBookings }, { count: totalCustomers }, { count: totalMechanics }, { data: completedOrders }, { data: bookingsByService }, { data: recentBookings },] = await Promise.all([
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'completed'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'cancelled'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
+        supabase_js_1.supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'customer').eq('is_active', true),
+        supabase_js_1.supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'mechanic').eq('is_active', true),
+        supabase_js_1.supabaseAdmin.from('orders').select('total_amount, created_at').eq('status', 'completed'),
+        supabase_js_1.supabaseAdmin.from('booking_services').select('service_id, price_at_booking, services(name)').limit(1000),
+        supabase_js_1.supabaseAdmin.from('bookings').select('total_price, created_at, status').order('created_at', { ascending: false }).limit(500),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    const thisYear = new Date().getFullYear().toString();
+    const serviceRevenue = (recentBookings || [])
+        .filter((b) => b.status === 'completed')
+        .reduce((acc, b) => acc + Number(b.total_price), 0);
+    const partsRevenue = (completedOrders || [])
+        .reduce((acc, o) => acc + Number(o.total_amount), 0);
+    const dailyRevenue = (recentBookings || [])
+        .filter((b) => b.status === 'completed' && b.created_at?.startsWith(today))
+        .reduce((acc, b) => acc + Number(b.total_price), 0)
+        + (completedOrders || [])
+            .filter((o) => o.created_at?.startsWith(today))
+            .reduce((acc, o) => acc + Number(o.total_amount), 0);
+    const monthlyRevenue = (recentBookings || [])
+        .filter((b) => b.status === 'completed' && b.created_at?.startsWith(thisMonth))
+        .reduce((acc, b) => acc + Number(b.total_price), 0)
+        + (completedOrders || [])
+            .filter((o) => o.created_at?.startsWith(thisMonth))
+            .reduce((acc, o) => acc + Number(o.total_amount), 0);
+    const yearlyRevenue = (recentBookings || [])
+        .filter((b) => b.status === 'completed' && b.created_at?.startsWith(thisYear))
+        .reduce((acc, b) => acc + Number(b.total_price), 0)
+        + (completedOrders || [])
+            .filter((o) => o.created_at?.startsWith(thisYear))
+            .reduce((acc, o) => acc + Number(o.total_amount), 0);
+    const serviceMap = {};
+    for (const bs of bookingsByService || []) {
+        const sid = bs.service_id;
+        const name = bs.services?.name || sid;
+        if (!serviceMap[sid])
+            serviceMap[sid] = { name, count: 0, revenue: 0 };
+        serviceMap[sid].count += 1;
+        serviceMap[sid].revenue += Number(bs.price_at_booking);
+    }
+    const totalServiceBookings = Object.values(serviceMap).reduce((a, s) => a + s.count, 0);
+    const popularServices = Object.values(serviceMap)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5)
+        .map(s => ({
+        name: s.name,
+        bookingsCount: s.count,
+        sharePercent: totalServiceBookings > 0 ? Math.round((s.count / totalServiceBookings) * 100) : 0,
+        revenue: s.revenue,
+    }));
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    const revenueTrends = months.slice(0, new Date().getMonth() + 1).map((month, i) => {
+        const monthStr = `${thisYear}-${String(i + 1).padStart(2, '0')}`;
+        const sRev = (recentBookings || [])
+            .filter((b) => b.status === 'completed' && b.created_at?.startsWith(monthStr))
+            .reduce((acc, b) => acc + Number(b.total_price), 0);
+        const pRev = (completedOrders || [])
+            .filter((o) => o.created_at?.startsWith(monthStr))
+            .reduce((acc, o) => acc + Number(o.total_amount), 0);
+        return { month, serviceRevenue: sRev, partsRevenue: pRev };
+    });
+    (0, response_js_1.sendSuccess)(res, {
         overview: {
-            totalRevenue: 48650000,
-            dailyRevenue: 2450000,
-            monthlyRevenue: 34800000,
-            yearlyRevenue: 218500000,
-            totalBookings: 148,
-            completedBookings: 132,
-            pendingBookings: 5,
-            cancelledBookings: 11,
-            totalCustomers: 86,
-            totalMechanics: 4,
-            productSalesCount: 64,
+            totalRevenue: serviceRevenue + partsRevenue,
+            dailyRevenue,
+            monthlyRevenue,
+            yearlyRevenue,
+            totalBookings: totalBookings || 0,
+            completedBookings: completedBookings || 0,
+            pendingBookings: pendingBookings || 0,
+            cancelledBookings: (cancelledBookings || 0) + (rejectedBookings || 0),
+            totalCustomers: totalCustomers || 0,
+            totalMechanics: totalMechanics || 0,
+            productSalesCount: (completedOrders || []).length,
         },
-        popularServices: [
-            { name: 'Advanced Engine Tune-Up', bookingsCount: 54, sharePercent: 36 },
-            { name: 'Full Synthetic Fluid & Filter', bookingsCount: 42, sharePercent: 28 },
-            { name: 'Precision Brake Overhaul', bookingsCount: 26, sharePercent: 18 },
-            { name: 'Suspension & Laser Alignment', bookingsCount: 16, sharePercent: 11 },
-            { name: 'Climate Purge & Ozone', bookingsCount: 10, sharePercent: 7 },
-        ],
-        revenueTrends: [
-            { month: 'Jun', serviceRevenue: 18200000, partsRevenue: 7500000 },
-            { month: 'Jul', serviceRevenue: 21400000, partsRevenue: 9200000 },
-            { month: 'Agu', serviceRevenue: 24000000, partsRevenue: 10100000 },
-            { month: 'Sep', serviceRevenue: 22800000, partsRevenue: 8900000 },
-            { month: 'Okt', serviceRevenue: 26500000, partsRevenue: 11400000 },
-            { month: 'Nov', serviceRevenue: 23100000, partsRevenue: 11700000 },
-        ],
-    };
-    (0, response_js_1.sendSuccess)(res, analytics, 'Data analitik bisnis TORSI');
+        popularServices,
+        revenueTrends,
+    }, 'Data analitik bisnis MELTUNE AUTO');
 });
-exports.dashboardRouter.get('/mechanic', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('mechanic', 'superadmin'), (_req, res) => {
-    const summary = {
-        todayBookingsCount: 4,
-        pendingActionCount: 1,
-        inProgressBayCount: 2,
-        completedTodayCount: 1,
-        activeBayAllocations: [
-            { bayNumber: 'Bay 1', vehicle: 'Mazda 3 Hatchback (B 8832 KLO)', service: 'Suspension Laser Alignment', status: 'In Inspection' },
-            { bayNumber: 'Bay 2', vehicle: 'Honda Civic Turbo (B 1045 TRS)', service: 'Advanced Engine Tune-Up', status: 'In Progress' },
-            { bayNumber: 'Bay 3', vehicle: 'Toyota Fortuner (B 2291 TIK)', service: 'Brake Fluid Flushing', status: 'Completed & Ready' },
-            { bayNumber: 'Bay 4', vehicle: 'Empty / Standby', service: '-', status: 'Idle' },
-        ],
-    };
-    (0, response_js_1.sendSuccess)(res, summary, 'Ringkasan operasional mekanik');
+exports.dashboardRouter.get('/mechanic', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('mechanic', 'superadmin'), async (_req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const [{ count: todayCount }, { count: pendingCount }, { count: inProgressCount }, { count: completedTodayCount }, { data: activeBookings },] = await Promise.all([
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('scheduled_date', today).not('status', 'in', '("cancelled","rejected")'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'in_progress'),
+        supabase_js_1.supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'completed').eq('scheduled_date', today),
+        supabase_js_1.supabaseAdmin.from('bookings')
+            .select(`
+        id, booking_reference, status, scheduled_time_slot,
+        vehicles(brand, model, year, license_plate),
+        booking_services(services(name))
+      `)
+            .eq('scheduled_date', today)
+            .in('status', ['confirmed', 'in_progress'])
+            .order('scheduled_time_slot'),
+    ]);
+    const bayAllocations = (activeBookings || []).map((b, i) => ({
+        bayNumber: `Bay ${i + 1}`,
+        vehicle: `${b.vehicles?.brand || ''} ${b.vehicles?.model || ''} (${b.vehicles?.license_plate || ''})`,
+        service: b.booking_services?.[0]?.services?.name || '-',
+        status: b.status === 'in_progress' ? 'In Progress' : 'Scheduled',
+        bookingReference: b.booking_reference,
+    }));
+    while (bayAllocations.length < 4) {
+        bayAllocations.push({ bayNumber: `Bay ${bayAllocations.length + 1}`, vehicle: 'Empty / Standby', service: '-', status: 'Idle', bookingReference: '' });
+    }
+    (0, response_js_1.sendSuccess)(res, {
+        todayBookingsCount: todayCount || 0,
+        pendingActionCount: pendingCount || 0,
+        inProgressBayCount: inProgressCount || 0,
+        completedTodayCount: completedTodayCount || 0,
+        activeBayAllocations: bayAllocations.slice(0, 4),
+    }, 'Ringkasan operasional mekanik');
 });

@@ -29,10 +29,10 @@ app.get('/health', (_req, res) => {
   sendSuccess(res, {
     status: 'online',
     timestamp: new Date().toISOString(),
-    service: 'torsi-be',
+    service: 'meltune-be',
     version: '1.0.0',
     environment: config.nodeEnv,
-  }, 'TORSI REST API Service Healthy');
+  }, 'MELTUNE REST API Service Healthy');
 });
 
 const v1Router = express.Router();
@@ -53,7 +53,7 @@ app.use(errorHandler);
 
 if (process.env.NODE_ENV !== 'test') {
   app.listen(config.port, () => {
-    console.log(`[TORSI Backend] REST API Server listening on port ${config.port}`);
-    console.log(`[TORSI Backend] API base: http://localhost:${config.port}/api/v1`);
+    console.log(`[MELTUNE Backend] REST API Server listening on port ${config.port}`);
+    console.log(`[MELTUNE Backend] API base: http://localhost:${config.port}/api/v1`);
   });
 }

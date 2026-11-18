@@ -1,163 +1,309 @@
 import { Router } from 'express';
 import { authenticateToken, requireRole } from '../../middleware/auth.js';
+import { supabaseAdmin } from '../../config/supabase.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 
 export const adminRouter = Router();
 
-export interface AdminCustomerItem {
-  id: string;
-  fullName: string;
-  email: string;
-  phone: string;
-  totalVehicles: number;
-  totalBookings: number;
-  loyaltyPoints: number;
-  status: 'active' | 'suspended';
-  registeredAt: string;
-}
-
-export interface AdminMechanicItem {
-  id: string;
-  fullName: string;
-  email: string;
-  specialization: string;
-  assignedBays: string[];
-  status: 'active' | 'inactive';
-  joinedAt: string;
-}
-
-const mockCustomers: AdminCustomerItem[] = [
-  {
-    id: 'usr_mock_user',
-    fullName: 'Budi Santoso',
-    email: 'budi@torsi.id',
-    phone: '+6281234567890',
-    totalVehicles: 2,
-    totalBookings: 2,
-    loyaltyPoints: 420,
-    status: 'active',
-    registeredAt: '2026-09-15T08:00:00Z',
-  },
-  {
-    id: 'usr_cust_danang',
-    fullName: 'Danang Prasetyo',
-    email: 'danang@example.com',
-    phone: '+6281399887766',
-    totalVehicles: 1,
-    totalBookings: 1,
-    loyaltyPoints: 120,
-    status: 'active',
-    registeredAt: '2026-10-02T11:20:00Z',
-  },
-  {
-    id: 'usr_cust_reza',
-    fullName: 'Reza Pratama',
-    email: 'reza@example.com',
-    phone: '+6281755443322',
-    totalVehicles: 1,
-    totalBookings: 0,
-    loyaltyPoints: 30,
-    status: 'suspended',
-    registeredAt: '2026-10-20T14:10:00Z',
-  },
-];
-
-const mockMechanics: AdminMechanicItem[] = [
-  {
-    id: 'usr_mech_hendra',
-    fullName: 'Hendra Wijaya',
-    email: 'hendra@torsi.id',
-    specialization: 'Lead Diagnostics & Powertrain',
-    assignedBays: ['Bay 1', 'Bay 2'],
-    status: 'active',
-    joinedAt: '2026-01-10T08:00:00Z',
-  },
-  {
-    id: 'usr_mech_agus',
-    fullName: 'Agus Salim',
-    email: 'agus@torsi.id',
-    specialization: 'Chassis, Suspension & Wheel Alignment',
-    assignedBays: ['Bay 3'],
-    status: 'active',
-    joinedAt: '2026-03-01T08:00:00Z',
-  },
-  {
-    id: 'usr_mech_fauzi',
-    fullName: 'Fauzi Rahmat',
-    email: 'fauzi@torsi.id',
-    specialization: 'Auto-Electrical & Air Conditioning',
-    assignedBays: ['Bay 4'],
-    status: 'active',
-    joinedAt: '2026-06-15T08:00:00Z',
-  },
-];
-
-let workshopSettings = {
-  workshopName: 'TORSI Automotive Service & Parts',
-  address: 'Kawasan Otomotif BSD Blok B3 No. 12, Tangerang Selatan, Banten 15310',
-  phone: '+62 21 5590 8820',
-  whatsapp: '+62 811 9876 543',
-  operatingHours: 'Senin - Sabtu: 08:30 - 17:30 WIB (Minggu Libur)',
-  maxBookingsPerSlot: 2,
-  dailyCheckInBasePoints: 15,
-  dailyStreakBonusMultiplier: 5,
-};
-
 adminRouter.use(authenticateToken, requireRole('superadmin'));
 
-adminRouter.get('/customers', (_req, res) => {
-  sendSuccess(res, mockCustomers, 'Daftar pelanggan');
+adminRouter.get('/customers', async (_req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, phone, role, is_active, created_at')
+    .eq('role', 'customer')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    sendError(res, error.message, 500, 'DB_ERROR');
+    return;
+  }
+
+  const customerIds = (data || []).map((p: any) => p.id);
+
+  const { data: vehicleCounts } = await supabaseAdmin
+    .from('vehicles')
+    .select('user_id')
+    .in('user_id', customerIds);
+
+  const { data: bookingCounts } = await supabaseAdmin
+    .from('bookings')
+    .select('user_id')
+    .in('user_id', customerIds);
+
+  const { data: loyaltyData } = await supabaseAdmin
+    .from('loyalty_accounts')
+    .select('user_id, points')
+    .in('user_id', customerIds);
+
+  const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers();
+
+  const mapped = (data || []).map((p: any) => {
+    const authUser = authUsers?.users?.find((u: any) => u.id === p.id);
+    return {
+      id: p.id,
+      fullName: p.full_name,
+      email: authUser?.email || '',
+      phone: p.phone || '',
+      totalVehicles: (vehicleCounts || []).filter((v: any) => v.user_id === p.id).length,
+      totalBookings: (bookingCounts || []).filter((b: any) => b.user_id === p.id).length,
+      loyaltyPoints: (loyaltyData || []).find((l: any) => l.user_id === p.id)?.points || 0,
+      status: p.is_active ? 'active' : 'suspended',
+      registeredAt: p.created_at,
+    };
+  });
+
+  sendSuccess(res, mapped, 'Daftar pelanggan');
 });
 
-adminRouter.patch('/customers/:id/status', (req, res) => {
+adminRouter.patch('/customers/:id/status', async (req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
   const { status } = req.body;
-  const cust = mockCustomers.find(c => c.id === req.params.id);
-  if (!cust) {
-    sendError(res, 'Pelanggan tidak ditemukan', 404);
+  if (!['active', 'suspended'].includes(status)) {
+    sendError(res, 'Status tidak valid. Gunakan "active" atau "suspended"', 400, 'INVALID_STATUS');
     return;
   }
-  cust.status = status;
-  sendSuccess(res, cust, `Status akun pelanggan diubah menjadi ${status}`);
-});
+  const isActive = status === 'active';
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .update({ is_active: isActive, updated_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('role', 'customer')
+    .select('id, full_name, is_active')
+    .single();
 
-adminRouter.get('/mechanics', (_req, res) => {
-  sendSuccess(res, mockMechanics, 'Daftar mekanik workshop');
-});
-
-adminRouter.post('/mechanics', (req, res) => {
-  const { fullName, email, specialization, assignedBays } = req.body;
-  if (!fullName || !email) {
-    sendError(res, 'Nama lengkap dan email wajib diisi', 400);
+  if (error || !data) {
+    sendError(res, 'Pelanggan tidak ditemukan', 404, 'NOT_FOUND');
     return;
   }
-  const newMech: AdminMechanicItem = {
-    id: `usr_mech_${Date.now()}`,
+  sendSuccess(res, { id: data.id, fullName: data.full_name, status: data.is_active ? 'active' : 'suspended' }, `Status akun diubah menjadi ${status}`);
+});
+
+adminRouter.delete('/customers/:id', async (req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const { error } = await supabaseAdmin.auth.admin.deleteUser(req.params.id);
+  if (error) {
+    sendError(res, error.message, 500, 'DB_ERROR');
+    return;
+  }
+  sendSuccess(res, { id: req.params.id }, 'Akun pelanggan berhasil dihapus');
+});
+
+adminRouter.get('/mechanics', async (_req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, phone, role, is_active, created_at')
+    .eq('role', 'mechanic')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    sendError(res, error.message, 500, 'DB_ERROR');
+    return;
+  }
+
+  const { data: authUsers } = await supabaseAdmin.auth.admin.listUsers();
+
+  const mapped = (data || []).map((p: any) => {
+    const authUser = authUsers?.users?.find((u: any) => u.id === p.id);
+    return {
+      id: p.id,
+      fullName: p.full_name,
+      email: authUser?.email || '',
+      phone: p.phone || '',
+      status: p.is_active ? 'active' : 'inactive',
+      joinedAt: p.created_at,
+    };
+  });
+
+  sendSuccess(res, mapped, 'Daftar mekanik workshop');
+});
+
+adminRouter.post('/mechanics', async (req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const { fullName, email, password, phone } = req.body;
+  if (!fullName || !email || !password) {
+    sendError(res, 'Nama lengkap, email, dan password wajib diisi', 400, 'VALIDATION_ERROR');
+    return;
+  }
+
+  const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { full_name: fullName, phone: phone || null },
+  });
+
+  if (authErr || !authData.user) {
+    sendError(res, authErr?.message || 'Gagal membuat akun mekanik', 500, 'AUTH_ERROR');
+    return;
+  }
+
+  const { error: profileErr } = await supabaseAdmin
+    .from('profiles')
+    .update({ role: 'mechanic', phone: phone || null, updated_at: new Date().toISOString() })
+    .eq('id', authData.user.id);
+
+  if (profileErr) {
+    sendError(res, profileErr.message, 500, 'DB_ERROR');
+    return;
+  }
+
+  sendSuccess(res, {
+    id: authData.user.id,
     fullName,
     email,
-    specialization: specialization || 'General Technician',
-    assignedBays: assignedBays || ['Bay 1'],
+    phone: phone || '',
     status: 'active',
-    joinedAt: new Date().toISOString(),
-  };
-  mockMechanics.push(newMech);
-  sendSuccess(res, newMech, 'Akun mekanik berhasil dibuat', 201);
+    joinedAt: authData.user.created_at,
+  }, 'Akun mekanik berhasil dibuat', 201);
 });
 
-adminRouter.patch('/mechanics/:id', (req, res) => {
-  const mech = mockMechanics.find(m => m.id === req.params.id);
-  if (!mech) {
-    sendError(res, 'Mekanik tidak ditemukan', 404);
+adminRouter.patch('/mechanics/:id', async (req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
     return;
   }
-  Object.assign(mech, req.body);
-  sendSuccess(res, mech, 'Data mekanik diperbarui');
+  const { fullName, phone, status } = req.body;
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (fullName !== undefined) updates.full_name = fullName;
+  if (phone !== undefined) updates.phone = phone;
+  if (status !== undefined) updates.is_active = status === 'active';
+
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('role', 'mechanic')
+    .select('id, full_name, phone, is_active')
+    .single();
+
+  if (error || !data) {
+    sendError(res, 'Mekanik tidak ditemukan', 404, 'NOT_FOUND');
+    return;
+  }
+  sendSuccess(res, { id: data.id, fullName: data.full_name, phone: data.phone, status: data.is_active ? 'active' : 'inactive' }, 'Data mekanik diperbarui');
 });
 
-adminRouter.get('/settings', (_req, res) => {
-  sendSuccess(res, workshopSettings, 'Pengaturan operasional workshop');
+adminRouter.get('/settings', async (_req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const { data, error } = await supabaseAdmin
+    .from('workshop_settings')
+    .select('*')
+    .eq('id', 1)
+    .single();
+  if (error || !data) {
+    sendError(res, 'Pengaturan workshop tidak ditemukan', 404, 'NOT_FOUND');
+    return;
+  }
+  const operatingHoursFormatted = typeof data.operating_hours === 'object' && data.operating_hours !== null
+    ? (data.operating_hours.formatted || JSON.stringify(data.operating_hours))
+    : (data.operating_hours || 'Senin - Sabtu: 08:30 - 17:30 WIB (Minggu Libur)');
+
+  const loyaltyCfg = typeof data.loyalty_config === 'object' && data.loyalty_config !== null
+    ? data.loyalty_config
+    : {};
+
+  sendSuccess(res, {
+    workshopName: data.workshop_name,
+    address: data.address,
+    phone: data.phone,
+    whatsapp: data.whatsapp,
+    operatingHours: operatingHoursFormatted,
+    maxBookingsPerSlot: data.max_bookings_per_slot ?? 2,
+    dailyCheckInBasePoints: data.daily_checkin_base_points ?? loyaltyCfg.base_points ?? 15,
+    dailyStreakBonusMultiplier: data.daily_streak_bonus_multiplier ?? loyaltyCfg.streak_multiplier ?? 5,
+    maxStreakBonusPoints: data.max_streak_bonus_points ?? loyaltyCfg.max_bonus ?? 25,
+  }, 'Pengaturan operasional workshop');
 });
 
-adminRouter.put('/settings', (req, res) => {
-  workshopSettings = { ...workshopSettings, ...req.body };
-  sendSuccess(res, workshopSettings, 'Pengaturan workshop berhasil disimpan');
+adminRouter.put('/settings', async (req, res) => {
+  if (!supabaseAdmin) {
+    sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+    return;
+  }
+  const {
+    workshopName, address, phone, whatsapp, operatingHours,
+    maxBookingsPerSlot, dailyCheckInBasePoints, dailyStreakBonusMultiplier, maxStreakBonusPoints,
+  } = req.body;
+
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (workshopName !== undefined) updates.workshop_name = workshopName;
+  if (address !== undefined) updates.address = address;
+  if (phone !== undefined) updates.phone = phone;
+  if (whatsapp !== undefined) updates.whatsapp = whatsapp;
+  if (maxBookingsPerSlot !== undefined) updates.max_bookings_per_slot = Number(maxBookingsPerSlot);
+
+  if (operatingHours !== undefined) {
+    updates.operating_hours = operatingHours;
+  }
+
+  const { data: currentSettings } = await supabaseAdmin
+    .from('workshop_settings')
+    .select('*')
+    .eq('id', 1)
+    .single();
+
+  const currentLoyalty = (currentSettings && typeof currentSettings.loyalty_config === 'object' && currentSettings.loyalty_config) || {};
+  const newBasePoints = dailyCheckInBasePoints !== undefined ? Number(dailyCheckInBasePoints) : (currentSettings?.daily_checkin_base_points ?? 15);
+  const newMultiplier = dailyStreakBonusMultiplier !== undefined ? Number(dailyStreakBonusMultiplier) : (currentSettings?.daily_streak_bonus_multiplier ?? 5);
+  const newMax = maxStreakBonusPoints !== undefined ? Number(maxStreakBonusPoints) : (currentSettings?.max_streak_bonus_points ?? 25);
+
+  if (dailyCheckInBasePoints !== undefined) updates.daily_checkin_base_points = newBasePoints;
+  if (dailyStreakBonusMultiplier !== undefined) updates.daily_streak_bonus_multiplier = newMultiplier;
+  if (maxStreakBonusPoints !== undefined) updates.max_streak_bonus_points = newMax;
+
+  updates.loyalty_config = {
+    ...currentLoyalty,
+    base_points: newBasePoints,
+    streak_multiplier: newMultiplier,
+    max_bonus: newMax,
+  };
+
+  const { data, error } = await supabaseAdmin
+    .from('workshop_settings')
+    .update(updates)
+    .eq('id', 1)
+    .select()
+    .single();
+
+  if (error) {
+    sendError(res, error.message, 500, 'DB_ERROR');
+    return;
+  }
+
+  const operatingHoursRes = typeof data.operating_hours === 'object' && data.operating_hours !== null
+    ? (data.operating_hours.formatted || JSON.stringify(data.operating_hours))
+    : (data.operating_hours || 'Senin - Sabtu: 08:30 - 17:30 WIB (Minggu Libur)');
+
+  sendSuccess(res, {
+    workshopName: data.workshop_name,
+    address: data.address,
+    phone: data.phone,
+    whatsapp: data.whatsapp,
+    operatingHours: operatingHoursRes,
+    maxBookingsPerSlot: data.max_bookings_per_slot,
+    dailyCheckInBasePoints: data.daily_checkin_base_points,
+    dailyStreakBonusMultiplier: data.daily_streak_bonus_multiplier,
+    maxStreakBonusPoints: data.max_streak_bonus_points,
+  }, 'Pengaturan workshop berhasil disimpan');
 });

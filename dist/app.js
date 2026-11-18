@@ -30,10 +30,10 @@ exports.app.get('/health', (_req, res) => {
     (0, response_js_1.sendSuccess)(res, {
         status: 'online',
         timestamp: new Date().toISOString(),
-        service: 'torsi-be',
+        service: 'meltune-be',
         version: '1.0.0',
         environment: env_js_1.config.nodeEnv,
-    }, 'TORSI REST API Service Healthy');
+    }, 'MELTUNE REST API Service Healthy');
 });
 const v1Router = express_1.default.Router();
 v1Router.use('/auth', routes_js_1.authRouter);
@@ -50,7 +50,7 @@ exports.app.use('/api/v1', v1Router);
 exports.app.use(error_js_1.errorHandler);
 if (process.env.NODE_ENV !== 'test') {
     exports.app.listen(env_js_1.config.port, () => {
-        console.log(`[TORSI Backend] REST API Server listening on port ${env_js_1.config.port}`);
-        console.log(`[TORSI Backend] API base: http://localhost:${env_js_1.config.port}/api/v1`);
+        console.log(`[MELTUNE Backend] REST API Server listening on port ${env_js_1.config.port}`);
+        console.log(`[MELTUNE Backend] API base: http://localhost:${env_js_1.config.port}/api/v1`);
     });
 }

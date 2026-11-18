@@ -1,147 +1,268 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.availableRewards = exports.loyaltyRouter = void 0;
+exports.loyaltyRouter = void 0;
 const express_1 = require("express");
 const auth_js_1 = require("../../middleware/auth.js");
+const supabase_js_1 = require("../../config/supabase.js");
 const response_js_1 = require("../../utils/response.js");
 exports.loyaltyRouter = (0, express_1.Router)();
-const mockLoyaltyAccounts = {
-    usr_mock_user: {
-        userId: 'usr_mock_user',
-        points: 420,
-        currentStreak: 5,
-        longestStreak: 12,
-        lastCheckInDate: '2026-11-11',
-        redemptionHistory: [
-            {
-                id: 'rdm_01',
-                rewardId: 'rew_microfiber_pack',
-                rewardTitle: 'Paket Kain Microfiber Edgeless Ultra-Plush (3 Pcs)',
-                pointsSpent: 120,
-                redeemedAt: '2026-11-06T10:15:00Z',
-                code: 'TRS-RWD-7712',
-            },
-        ],
-    },
-};
-exports.availableRewards = [
-    {
-        id: 'rew_washer_fluid',
-        title: 'Konsentrat Wiper Fluid Hydrophobic (250ml)',
-        description: 'Menolak tetesan air hujan pada kaca depan dan mencegah kerak air wiper.',
-        pointsCost: 75,
-        stock: 28,
-        imageUrl: 'https://images.unsplash.com/photo-1507136566006-cfc505b114fc?auto=format&fit=crop&q=80&w=800',
-    },
-    {
-        id: 'rew_microfiber_pack',
-        title: 'Paket Microfiber Edgeless 500 GSM (3 Pcs)',
-        description: 'Serat ultra-halus untuk finishing detailing tanpa swirl mark dan daya serap tinggi.',
-        pointsCost: 120,
-        stock: 19,
-        imageUrl: 'https://images.unsplash.com/photo-1600790142055-619df03207e6?auto=format&fit=crop&q=80&w=800',
-    },
-    {
-        id: 'rew_tire_gel',
-        title: 'TORSI Satin Black Tire Dressing Gel (300ml)',
-        description: 'Kilap alami satin deep black tahan air, tidak mengotori fender mobil saat kecepatan tinggi.',
-        pointsCost: 180,
-        stock: 14,
-        imageUrl: 'https://images.unsplash.com/photo-1580273916550-e323be2ae537?auto=format&fit=crop&q=80&w=800',
-    },
-    {
-        id: 'rew_oil_1l',
-        title: 'Motul Synthetic Maintenance Engine Oil (1L)',
-        description: 'Oli top-up cadangan spesifikasi SAE 5W-30 SN/GF-5 dalam kemasan botol kedap.',
-        pointsCost: 300,
-        stock: 8,
-        imageUrl: 'https://images.unsplash.com/photo-1619642751034-765dfdf7c58e?auto=format&fit=crop&q=80&w=800',
-    },
-];
 exports.loyaltyRouter.use(auth_js_1.authenticateToken);
-exports.loyaltyRouter.get('/profile', (req, res) => {
-    const userId = req.user.id;
-    if (!mockLoyaltyAccounts[userId]) {
-        mockLoyaltyAccounts[userId] = {
-            userId,
-            points: 50,
-            currentStreak: 1,
-            longestStreak: 1,
-            redemptionHistory: [],
-        };
+exports.loyaltyRouter.get('/profile', async (req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
     }
-    (0, response_js_1.sendSuccess)(res, mockLoyaltyAccounts[userId], 'Data loyalitas pelanggan');
-});
-exports.loyaltyRouter.get('/rewards', (_req, res) => {
-    (0, response_js_1.sendSuccess)(res, exports.availableRewards, 'Katalog reward loyalitas');
-});
-exports.loyaltyRouter.post('/check-in', (req, res) => {
     const userId = req.user.id;
-    const profile = mockLoyaltyAccounts[userId] || {
-        userId,
-        points: 0,
-        currentStreak: 0,
-        longestStreak: 0,
-        redemptionHistory: [],
+    const { data: account, error: accErr } = await supabase_js_1.supabaseAdmin
+        .from('loyalty_accounts')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+    if (accErr || !account) {
+        (0, response_js_1.sendError)(res, 'Data loyalitas tidak ditemukan', 404, 'NOT_FOUND');
+        return;
+    }
+    const { data: redemptions } = await supabase_js_1.supabaseAdmin
+        .from('reward_redemptions')
+        .select('id, reward_id, rewards(title), points_spent, redemption_code, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+    const profile = {
+        userId: account.user_id,
+        points: account.points,
+        currentStreak: account.current_streak,
+        longestStreak: account.longest_streak,
+        lastCheckInDate: account.last_check_in_date,
+        redemptionHistory: (redemptions || []).map((r) => ({
+            id: r.id,
+            rewardId: r.reward_id,
+            rewardTitle: r.rewards?.title || r.reward_id,
+            pointsSpent: r.points_spent,
+            redeemedAt: r.created_at,
+            code: r.redemption_code,
+        })),
     };
+    (0, response_js_1.sendSuccess)(res, profile, 'Data loyalitas pelanggan');
+});
+exports.loyaltyRouter.get('/rewards', async (_req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const { data, error } = await supabase_js_1.supabaseAdmin
+        .from('rewards')
+        .select('*')
+        .eq('is_active', true)
+        .order('points_cost');
+    if (error) {
+        (0, response_js_1.sendError)(res, error.message, 500, 'DB_ERROR');
+        return;
+    }
+    const mapped = (data || []).map(r => ({
+        id: r.id,
+        title: r.title,
+        description: r.description,
+        pointsCost: r.points_cost,
+        stock: r.stock,
+        imageUrl: r.image_url,
+    }));
+    (0, response_js_1.sendSuccess)(res, mapped, 'Katalog reward loyalitas');
+});
+exports.loyaltyRouter.post('/check-in', async (req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const userId = req.user.id;
     const todayStr = new Date().toISOString().slice(0, 10);
-    if (profile.lastCheckInDate === todayStr) {
+    const { data: account, error: accErr } = await supabase_js_1.supabaseAdmin
+        .from('loyalty_accounts')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+    if (accErr || !account) {
+        (0, response_js_1.sendError)(res, 'Akun loyalitas tidak ditemukan', 404, 'NOT_FOUND');
+        return;
+    }
+    if (account.last_check_in_date === todayStr) {
         (0, response_js_1.sendError)(res, 'Anda sudah melakukan check-in harian untuk hari ini.', 400, 'ALREADY_CHECKED_IN');
         return;
     }
     const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-    if (profile.lastCheckInDate === yesterday) {
-        profile.currentStreak += 1;
+    const newStreak = account.last_check_in_date === yesterday ? account.current_streak + 1 : 1;
+    const newLongest = Math.max(account.longest_streak, newStreak);
+    const { data: settings } = await supabase_js_1.supabaseAdmin
+        .from('workshop_settings')
+        .select('daily_checkin_base_points, daily_streak_bonus_multiplier, max_streak_bonus_points')
+        .eq('id', 1)
+        .single();
+    const basePoints = settings?.daily_checkin_base_points ?? 15;
+    const bonusMultiplier = settings?.daily_streak_bonus_multiplier ?? 5;
+    const maxBonus = settings?.max_streak_bonus_points ?? 25;
+    const bonus = Math.min(newStreak * bonusMultiplier, maxBonus);
+    const earnedPoints = basePoints + bonus;
+    const newPoints = account.points + earnedPoints;
+    const { error: updateErr } = await supabase_js_1.supabaseAdmin
+        .from('loyalty_accounts')
+        .update({
+        points: newPoints,
+        current_streak: newStreak,
+        longest_streak: newLongest,
+        last_check_in_date: todayStr,
+        updated_at: new Date().toISOString(),
+    })
+        .eq('user_id', userId);
+    if (updateErr) {
+        (0, response_js_1.sendError)(res, updateErr.message, 500, 'DB_ERROR');
+        return;
     }
-    else {
-        profile.currentStreak = 1;
-    }
-    if (profile.currentStreak > profile.longestStreak) {
-        profile.longestStreak = profile.currentStreak;
-    }
-    const bonusMultiplier = Math.min(profile.currentStreak * 5, 25);
-    const earnedPoints = 15 + bonusMultiplier;
-    profile.points += earnedPoints;
-    profile.lastCheckInDate = todayStr;
-    mockLoyaltyAccounts[userId] = profile;
+    await supabase_js_1.supabaseAdmin.from('daily_checkins').insert({
+        user_id: userId,
+        check_in_date: todayStr,
+        points_awarded: earnedPoints,
+        streak_count: newStreak,
+    });
     (0, response_js_1.sendSuccess)(res, {
         pointsEarned: earnedPoints,
-        currentPoints: profile.points,
-        currentStreak: profile.currentStreak,
-        message: `Check-in berhasil! +${earnedPoints} poin ditambahkan (Streak: ${profile.currentStreak} hari).`,
+        currentPoints: newPoints,
+        currentStreak: newStreak,
+        message: `Check-in berhasil! +${earnedPoints} poin ditambahkan (Streak: ${newStreak} hari).`,
     }, 'Check-in berhasil');
 });
-exports.loyaltyRouter.post('/redeem', (req, res) => {
+exports.loyaltyRouter.post('/redeem', async (req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
     const userId = req.user.id;
     const { rewardId } = req.body;
-    const reward = exports.availableRewards.find(r => r.id === rewardId);
-    if (!reward) {
-        (0, response_js_1.sendError)(res, 'Reward tidak ditemukan', 404);
+    if (!rewardId) {
+        (0, response_js_1.sendError)(res, 'ID reward wajib disertakan', 400, 'VALIDATION_ERROR');
+        return;
+    }
+    const { data: reward, error: rErr } = await supabase_js_1.supabaseAdmin
+        .from('rewards')
+        .select('*')
+        .eq('id', rewardId)
+        .eq('is_active', true)
+        .single();
+    if (rErr || !reward) {
+        (0, response_js_1.sendError)(res, 'Reward tidak ditemukan', 404, 'NOT_FOUND');
         return;
     }
     if (reward.stock <= 0) {
-        (0, response_js_1.sendError)(res, 'Stok reward saat ini sedang habis', 400);
+        (0, response_js_1.sendError)(res, 'Stok reward saat ini sedang habis', 400, 'OUT_OF_STOCK');
         return;
     }
-    const profile = mockLoyaltyAccounts[userId];
-    if (!profile || profile.points < reward.pointsCost) {
-        (0, response_js_1.sendError)(res, 'Poin loyalitas Anda belum mencukupi untuk reward ini', 400);
+    const { data: account, error: accErr } = await supabase_js_1.supabaseAdmin
+        .from('loyalty_accounts')
+        .select('points')
+        .eq('user_id', userId)
+        .single();
+    if (accErr || !account) {
+        (0, response_js_1.sendError)(res, 'Akun loyalitas tidak ditemukan', 404, 'NOT_FOUND');
         return;
     }
-    profile.points -= reward.pointsCost;
-    reward.stock -= 1;
+    if (account.points < reward.points_cost) {
+        (0, response_js_1.sendError)(res, 'Poin loyalitas Anda belum mencukupi untuk reward ini', 400, 'INSUFFICIENT_POINTS');
+        return;
+    }
     const redemptionCode = `TRS-RWD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const redemptionRecord = {
-        id: `rdm_${Date.now()}`,
-        rewardId: reward.id,
-        rewardTitle: reward.title,
-        pointsSpent: reward.pointsCost,
-        redeemedAt: new Date().toISOString(),
-        code: redemptionCode,
-    };
-    profile.redemptionHistory.unshift(redemptionRecord);
+    const { data: redemption, error: redErr } = await supabase_js_1.supabaseAdmin
+        .from('reward_redemptions')
+        .insert({
+        user_id: userId,
+        reward_id: rewardId,
+        redemption_code: redemptionCode,
+        points_spent: reward.points_cost,
+        is_claimed: false,
+    })
+        .select()
+        .single();
+    if (redErr) {
+        (0, response_js_1.sendError)(res, redErr.message, 500, 'DB_ERROR');
+        return;
+    }
+    await supabase_js_1.supabaseAdmin
+        .from('loyalty_accounts')
+        .update({
+        points: account.points - reward.points_cost,
+        updated_at: new Date().toISOString(),
+    })
+        .eq('user_id', userId);
+    await supabase_js_1.supabaseAdmin
+        .from('rewards')
+        .update({ stock: reward.stock - 1 })
+        .eq('id', rewardId);
     (0, response_js_1.sendSuccess)(res, {
-        redemption: redemptionRecord,
-        remainingPoints: profile.points,
+        redemption: {
+            id: redemption.id,
+            rewardId: redemption.reward_id,
+            rewardTitle: reward.title,
+            pointsSpent: redemption.points_spent,
+            redeemedAt: redemption.created_at,
+            code: redemptionCode,
+        },
+        remainingPoints: account.points - reward.points_cost,
     }, 'Reward berhasil ditukarkan! Tunjukkan kode voucher ke kasir workshop.');
+});
+exports.loyaltyRouter.get('/rewards/admin', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('superadmin'), async (_req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const { data, error } = await supabase_js_1.supabaseAdmin.from('rewards').select('*').order('points_cost');
+    if (error) {
+        (0, response_js_1.sendError)(res, error.message, 500, 'DB_ERROR');
+        return;
+    }
+    (0, response_js_1.sendSuccess)(res, data, 'Semua data reward');
+});
+exports.loyaltyRouter.post('/rewards', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('superadmin'), async (req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const { title, description, pointsCost, stock, imageUrl } = req.body;
+    if (!title || !pointsCost || stock === undefined) {
+        (0, response_js_1.sendError)(res, 'Judul, poin, dan stok wajib diisi', 400, 'VALIDATION_ERROR');
+        return;
+    }
+    const id = `rew_${Date.now()}`;
+    const { data, error } = await supabase_js_1.supabaseAdmin
+        .from('rewards')
+        .insert({ id, title, description: description || '', points_cost: Number(pointsCost), stock: Number(stock), image_url: imageUrl || null, is_active: true })
+        .select()
+        .single();
+    if (error) {
+        (0, response_js_1.sendError)(res, error.message, 500, 'DB_ERROR');
+        return;
+    }
+    (0, response_js_1.sendSuccess)(res, data, 'Reward berhasil ditambahkan', 201);
+});
+exports.loyaltyRouter.put('/rewards/:id', auth_js_1.authenticateToken, (0, auth_js_1.requireRole)('superadmin'), async (req, res) => {
+    if (!supabase_js_1.supabaseAdmin) {
+        (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
+        return;
+    }
+    const { title, description, pointsCost, stock, imageUrl, isActive } = req.body;
+    const updates = {};
+    if (title !== undefined)
+        updates.title = title;
+    if (description !== undefined)
+        updates.description = description;
+    if (pointsCost !== undefined)
+        updates.points_cost = Number(pointsCost);
+    if (stock !== undefined)
+        updates.stock = Number(stock);
+    if (imageUrl !== undefined)
+        updates.image_url = imageUrl;
+    if (isActive !== undefined)
+        updates.is_active = isActive;
+    const { data, error } = await supabase_js_1.supabaseAdmin.from('rewards').update(updates).eq('id', req.params.id).select().single();
+    if (error || !data) {
+        (0, response_js_1.sendError)(res, 'Reward tidak ditemukan', 404, 'NOT_FOUND');
+        return;
+    }
+    (0, response_js_1.sendSuccess)(res, data, 'Reward berhasil diperbarui');
 });
