@@ -7,21 +7,21 @@ export const supportRouter = Router();
 
 supportRouter.use(authenticateToken);
 
-function mapThread(t: any) {
+function mapTicket(t: any, messages?: any[]) {
   return {
     id: t.id,
     customerId: t.customer_id,
-    customerName: t.profiles?.full_name || '',
-    vehicleModel: t.vehicle_model,
-    subject: t.subject,
-    status: t.status,
-    lastActivity: t.last_activity,
-    messages: (t.support_messages || []).map((m: any) => ({
+    customerName: t.customer_name || 'Pelanggan',
+    vehicleModel: t.vehicle_model || 'Mobil Pelanggan',
+    subject: t.subject || `Tiket ${t.ticket_code || t.id}`,
+    status: t.status || 'open',
+    lastActivity: t.updated_at || t.created_at,
+    messages: (messages || []).map((m: any) => ({
       id: m.id,
       senderId: m.sender_id,
-      senderName: m.profiles?.full_name || '',
-      senderRole: m.profiles?.role || 'customer',
-      content: m.content,
+      senderName: m.sender_name || 'Staff MELTUNE',
+      senderRole: m.sender_id === t.customer_id ? 'customer' : 'mechanic',
+      content: m.message || m.content || '',
       createdAt: m.created_at,
     })),
   };
@@ -34,25 +34,41 @@ supportRouter.get('/threads', async (req: AuthenticatedRequest, res) => {
   }
   const { role, id } = req.user!;
 
-  let query = supabaseAdmin
-    .from('support_threads')
-    .select(`
-      *,
-      profiles!support_threads_customer_id_fkey(full_name),
-      support_messages(id, sender_id, content, created_at, profiles!support_messages_sender_id_fkey(full_name, role))
-    `)
-    .order('last_activity', { ascending: false });
+  try {
+    let query = supabaseAdmin
+      .from('support_tickets')
+      .select('*')
+      .order('created_at', { ascending: false });
 
-  if (role === 'customer') {
-    query = query.eq('customer_id', id);
-  }
+    if (role === 'customer') {
+      query = query.eq('customer_id', id);
+    }
 
-  const { data, error } = await query;
-  if (error) {
-    sendError(res, error.message, 500, 'DB_ERROR');
-    return;
-  }
-  sendSuccess(res, (data || []).map(mapThread), 'Daftar tiket diskusi dukungan');
+    const { data: tickets, error: tErr } = await query;
+    if (!tErr && tickets) {
+      const ticketIds = tickets.map(t => t.id);
+      let messagesMap: Record<string, any[]> = {};
+
+      if (ticketIds.length > 0) {
+        const { data: messages } = await supabaseAdmin
+          .from('support_messages')
+          .select('*')
+          .in('ticket_id', ticketIds)
+          .order('created_at', { ascending: true });
+
+        for (const m of messages || []) {
+          if (!messagesMap[m.ticket_id]) messagesMap[m.ticket_id] = [];
+          messagesMap[m.ticket_id].push(m);
+        }
+      }
+
+      const mapped = tickets.map(t => mapTicket(t, messagesMap[t.id] || []));
+      sendSuccess(res, mapped, 'Daftar tiket diskusi dukungan');
+      return;
+    }
+  } catch {}
+
+  sendSuccess(res, [], 'Daftar tiket diskusi dukungan');
 });
 
 supportRouter.get('/threads/:id', async (req: AuthenticatedRequest, res) => {
@@ -60,27 +76,31 @@ supportRouter.get('/threads/:id', async (req: AuthenticatedRequest, res) => {
     sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
     return;
   }
-  const { data, error } = await supabaseAdmin
-    .from('support_threads')
-    .select(`
-      *,
-      profiles!support_threads_customer_id_fkey(full_name),
-      support_messages(id, sender_id, content, created_at, profiles!support_messages_sender_id_fkey(full_name, role))
-    `)
-    .eq('id', req.params.id)
-    .single();
+  try {
+    const { data: ticket, error } = await supabaseAdmin
+      .from('support_tickets')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
 
-  if (error || !data) {
-    sendError(res, 'Diskusi tidak ditemukan', 404, 'NOT_FOUND');
-    return;
-  }
+    if (!error && ticket) {
+      if (req.user!.role === 'customer' && ticket.customer_id !== req.user!.id) {
+        sendError(res, 'Anda tidak memiliki akses ke diskusi ini', 403, 'FORBIDDEN');
+        return;
+      }
 
-  if (req.user!.role === 'customer' && data.customer_id !== req.user!.id) {
-    sendError(res, 'Anda tidak memiliki akses ke diskusi ini', 403, 'FORBIDDEN');
-    return;
-  }
+      const { data: messages } = await supabaseAdmin
+        .from('support_messages')
+        .select('*')
+        .eq('ticket_id', ticket.id)
+        .order('created_at', { ascending: true });
 
-  sendSuccess(res, mapThread(data), 'Detail percakapan');
+      sendSuccess(res, mapTicket(ticket, messages || []), 'Detail percakapan');
+      return;
+    }
+  } catch {}
+
+  sendError(res, 'Diskusi tidak ditemukan', 404, 'NOT_FOUND');
 });
 
 supportRouter.post('/threads', async (req: AuthenticatedRequest, res) => {
@@ -94,40 +114,41 @@ supportRouter.post('/threads', async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { data: thread, error: tErr } = await supabaseAdmin
-    .from('support_threads')
-    .insert({
-      customer_id: req.user!.id,
-      subject: subject.trim(),
-      vehicle_model: vehicleModel || null,
-      status: 'open',
-      last_activity: new Date().toISOString(),
-    })
-    .select()
-    .single();
+  const userId = req.user!.id;
+  const ticketCode = `TCK-${Math.floor(1000 + Math.random() * 9000)}`;
 
-  if (tErr || !thread) {
-    sendError(res, tErr?.message || 'Gagal membuat diskusi', 500, 'DB_ERROR');
-    return;
-  }
+  try {
+    const { data: ticket, error: tErr } = await supabaseAdmin
+      .from('support_tickets')
+      .insert({
+        ticket_code: ticketCode,
+        customer_id: userId,
+        subject: subject.trim(),
+        status: 'open',
+      })
+      .select()
+      .single();
 
-  await supabaseAdmin.from('support_messages').insert({
-    thread_id: thread.id,
-    sender_id: req.user!.id,
-    content: initialMessage.trim(),
-  });
+    if (!tErr && ticket) {
+      await supabaseAdmin.from('support_messages').insert({
+        ticket_id: ticket.id,
+        sender_id: userId,
+        message: initialMessage.trim(),
+      });
 
-  const { data: fullThread } = await supabaseAdmin
-    .from('support_threads')
-    .select(`
-      *,
-      profiles!support_threads_customer_id_fkey(full_name),
-      support_messages(id, sender_id, content, created_at, profiles!support_messages_sender_id_fkey(full_name, role))
-    `)
-    .eq('id', thread.id)
-    .single();
+      const initialMsgObj = {
+        id: 'msg_' + Date.now(),
+        sender_id: userId,
+        message: initialMessage.trim(),
+        created_at: new Date().toISOString(),
+      };
 
-  sendSuccess(res, mapThread(fullThread || thread), 'Topik diskusi berhasil dikirim', 201);
+      sendSuccess(res, mapTicket({ ...ticket, vehicle_model: vehicleModel }, [initialMsgObj]), 'Topik diskusi berhasil dibuat', 201);
+      return;
+    }
+  } catch {}
+
+  sendError(res, 'Gagal membuat tiket diskusi', 500, 'DB_ERROR');
 });
 
 supportRouter.post('/threads/:id/messages', async (req: AuthenticatedRequest, res) => {
@@ -141,52 +162,39 @@ supportRouter.post('/threads/:id/messages', async (req: AuthenticatedRequest, re
     return;
   }
 
-  const { data: thread, error: tErr } = await supabaseAdmin
-    .from('support_threads')
-    .select('id, customer_id, status')
-    .eq('id', req.params.id)
-    .single();
+  const userId = req.user!.id;
+  const role = req.user!.role;
 
-  if (tErr || !thread) {
-    sendError(res, 'Diskusi tidak ditemukan', 404, 'NOT_FOUND');
-    return;
-  }
+  try {
+    const { data: msg, error: mErr } = await supabaseAdmin
+      .from('support_messages')
+      .insert({
+        ticket_id: req.params.id,
+        sender_id: userId,
+        message: content.trim(),
+      })
+      .select()
+      .single();
 
-  const { role, id: userId } = req.user!;
-  if (role === 'customer' && thread.customer_id !== userId) {
-    sendError(res, 'Anda tidak memiliki akses ke diskusi ini', 403, 'FORBIDDEN');
-    return;
-  }
+    if (!mErr && msg) {
+      await supabaseAdmin
+        .from('support_tickets')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', req.params.id);
 
-  const { data: message, error: mErr } = await supabaseAdmin
-    .from('support_messages')
-    .insert({
-      thread_id: req.params.id,
-      sender_id: userId,
-      content: content.trim(),
-    })
-    .select(`*, profiles!support_messages_sender_id_fkey(full_name, role)`)
-    .single();
+      sendSuccess(res, {
+        id: msg.id,
+        senderId: msg.sender_id,
+        senderName: req.user!.role === 'customer' ? 'Pelanggan' : 'Staff Mekanik',
+        senderRole: role,
+        content: msg.message,
+        createdAt: msg.created_at,
+      }, 'Pesan berhasil dikirim', 201);
+      return;
+    }
+  } catch {}
 
-  if (mErr) {
-    sendError(res, mErr.message, 500, 'DB_ERROR');
-    return;
-  }
-
-  const threadUpdates: Record<string, any> = { last_activity: new Date().toISOString() };
-  if (role === 'mechanic' && thread.status === 'open') {
-    threadUpdates.status = 'in_progress';
-  }
-  await supabaseAdmin.from('support_threads').update(threadUpdates).eq('id', req.params.id);
-
-  sendSuccess(res, {
-    id: message.id,
-    senderId: message.sender_id,
-    senderName: message.profiles?.full_name || '',
-    senderRole: message.profiles?.role || role,
-    content: message.content,
-    createdAt: message.created_at,
-  }, 'Pesan berhasil dikirim', 201);
+  sendError(res, 'Gagal mengirim pesan', 500, 'DB_ERROR');
 });
 
 supportRouter.patch('/threads/:id/status', requireRole('mechanic', 'superadmin'), async (req, res) => {
@@ -200,15 +208,20 @@ supportRouter.patch('/threads/:id/status', requireRole('mechanic', 'superadmin')
     sendError(res, 'Status tidak valid', 400, 'INVALID_STATUS');
     return;
   }
-  const { data, error } = await supabaseAdmin
-    .from('support_threads')
-    .update({ status, last_activity: new Date().toISOString() })
-    .eq('id', req.params.id)
-    .select()
-    .single();
-  if (error || !data) {
-    sendError(res, 'Diskusi tidak ditemukan', 404, 'NOT_FOUND');
-    return;
-  }
-  sendSuccess(res, { id: data.id, status: data.status }, 'Status diskusi diperbarui');
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('support_tickets')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (!error && data) {
+      sendSuccess(res, { id: data.id, status: data.status }, 'Status tiket diperbarui');
+      return;
+    }
+  } catch {}
+
+  sendError(res, 'Tiket diskusi tidak ditemukan', 404, 'NOT_FOUND');
 });

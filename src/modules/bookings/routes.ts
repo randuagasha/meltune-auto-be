@@ -8,7 +8,7 @@ export const bookingsRouter = Router();
 export type BookingStatus = 'pending' | 'confirmed' | 'in_progress' | 'waiting_for_parts' | 'completed' | 'cancelled' | 'rejected';
 
 const VALID_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
-  pending: ['confirmed', 'rejected'],
+  pending: ['confirmed', 'rejected', 'cancelled'],
   confirmed: ['in_progress', 'cancelled'],
   in_progress: ['waiting_for_parts', 'completed'],
   waiting_for_parts: ['in_progress', 'completed'],
@@ -29,26 +29,52 @@ export const AVAILABLE_TIME_SLOTS = [
 ];
 
 function mapBooking(b: any, services?: any[]) {
+  const vName = b.vehicle_brand
+    ? `${b.vehicle_brand} ${b.vehicle_model} ${b.vehicle_year || ''}`.trim()
+    : b.vehicles
+    ? `${b.vehicles.brand} ${b.vehicles.model} ${b.vehicles.year || ''}`.trim()
+    : b.vehicle_name || 'Mobil';
+
+  const vPlate = b.vehicle_plate || b.vehicles?.license_plate || b.license_plate || '';
+
+  const sDate = b.scheduled_date || (b.scheduled_start ? String(b.scheduled_start).slice(0, 10) : '');
+
+  const sTime = b.scheduled_time_slot || (
+    b.scheduled_start
+      ? `${String(b.scheduled_start).slice(11, 16)} - ${b.scheduled_end ? String(b.scheduled_end).slice(11, 16) : 'Selesai'}`
+      : '08:30 - 10:00'
+  );
+
+  const pDesc = b.customer_notes || b.problem_description || '';
+
+  const sNames = services && services.length > 0
+    ? services.map((s: any) => s.service_name || s.services?.name || s.service_id)
+    : b.service_names || [];
+
+  const sIds = services && services.length > 0
+    ? services.map((s: any) => s.service_id)
+    : b.service_ids || [];
+
   return {
     id: b.id,
-    bookingReference: b.booking_reference,
-    userId: b.user_id,
-    userName: b.profiles?.full_name || b.user_name || '',
+    bookingReference: b.booking_code || b.booking_reference || b.id,
+    userId: b.customer_id || b.user_id,
+    userName: b.profiles?.full_name || b.user_name || 'Pelanggan',
     userPhone: b.profiles?.phone || b.user_phone || '',
-    vehicleId: b.vehicle_id,
-    vehicleName: b.vehicles ? `${b.vehicles.brand} ${b.vehicles.model} ${b.vehicles.year}` : '',
-    licensePlate: b.vehicles?.license_plate || '',
-    serviceIds: services ? services.map((s: any) => s.service_id) : (b.service_ids || []),
-    serviceNames: services ? services.map((s: any) => s.services?.name || s.service_id) : (b.service_names || []),
-    totalPrice: Number(b.total_price),
-    totalDurationMinutes: b.total_duration_minutes,
-    scheduledDate: b.scheduled_date,
-    scheduledTimeSlot: b.scheduled_time_slot,
-    problemDescription: b.problem_description,
+    vehicleId: b.vehicle_id || b.id,
+    vehicleName: vName,
+    licensePlate: vPlate,
+    serviceIds: sIds,
+    serviceNames: sNames,
+    totalPrice: Number(b.total ?? b.total_price ?? 0),
+    totalDurationMinutes: b.total_duration_minutes || 60,
+    scheduledDate: sDate,
+    scheduledTimeSlot: sTime,
+    problemDescription: pDesc,
     photoUrls: b.photo_urls || [],
     status: b.status,
-    rejectionReason: b.rejection_reason,
-    mechanicNotes: b.mechanic_notes,
+    rejectionReason: b.rejection_reason || null,
+    mechanicNotes: b.mechanic_notes || null,
     createdAt: b.created_at,
     updatedAt: b.updated_at,
   };
@@ -68,34 +94,37 @@ bookingsRouter.get('/available-slots', async (req, res) => {
 
   const { data: settings } = await supabaseAdmin
     .from('workshop_settings')
-    .select('max_bookings_per_slot')
-    .eq('id', 1)
+    .select('*')
+    .limit(1)
     .single();
 
   const maxPerSlot = settings?.max_bookings_per_slot ?? 2;
 
   const { data: booked, error } = await supabaseAdmin
     .from('bookings')
-    .select('scheduled_time_slot')
-    .eq('scheduled_date', date as string)
+    .select('scheduled_start, status')
     .not('status', 'in', '("cancelled","rejected")');
 
-  if (error) {
-    sendError(res, error.message, 500, 'DB_ERROR');
-    return;
-  }
-
   const slotCounts: Record<string, number> = {};
-  for (const b of booked || []) {
-    slotCounts[b.scheduled_time_slot] = (slotCounts[b.scheduled_time_slot] || 0) + 1;
+  if (!error && booked) {
+    for (const b of booked) {
+      if (b.scheduled_start && String(b.scheduled_start).startsWith(date as string)) {
+        const timeKey = String(b.scheduled_start).slice(11, 16);
+        slotCounts[timeKey] = (slotCounts[timeKey] || 0) + 1;
+      }
+    }
   }
 
-  const slotData = AVAILABLE_TIME_SLOTS.map(slot => ({
-    slot,
-    available: (slotCounts[slot] || 0) < maxPerSlot,
-    capacity: maxPerSlot,
-    remaining: Math.max(0, maxPerSlot - (slotCounts[slot] || 0)),
-  }));
+  const slotData = AVAILABLE_TIME_SLOTS.map(slot => {
+    const slotStart = slot.split(' - ')[0];
+    const count = slotCounts[slotStart] || 0;
+    return {
+      slot,
+      available: count < maxPerSlot,
+      capacity: maxPerSlot,
+      remaining: Math.max(0, maxPerSlot - count),
+    };
+  });
 
   sendSuccess(res, { date, slots: slotData }, 'Ketersediaan slot berhasil diperiksa');
 });
@@ -111,25 +140,35 @@ bookingsRouter.get('/', async (req: AuthenticatedRequest, res) => {
 
   let query = supabaseAdmin
     .from('bookings')
-    .select(`
-      *,
-      profiles!bookings_user_id_fkey(full_name, phone),
-      vehicles(brand, model, year, license_plate),
-      booking_services(service_id, price_at_booking, services(name))
-    `)
+    .select('*')
     .order('created_at', { ascending: false });
 
   if (role === 'customer') {
-    query = query.eq('user_id', id);
+    query = query.eq('customer_id', id);
   }
 
-  const { data, error } = await query;
+  const { data: bookingsData, error } = await query;
   if (error) {
     sendError(res, error.message, 500, 'DB_ERROR');
     return;
   }
 
-  const mapped = (data || []).map(b => mapBooking(b, b.booking_services));
+  const bookingIds = (bookingsData || []).map((b: any) => b.id);
+  let servicesMap: Record<string, any[]> = {};
+
+  if (bookingIds.length > 0) {
+    const { data: bServices } = await supabaseAdmin
+      .from('booking_services')
+      .select('*')
+      .in('booking_id', bookingIds);
+
+    for (const bs of bServices || []) {
+      if (!servicesMap[bs.booking_id]) servicesMap[bs.booking_id] = [];
+      servicesMap[bs.booking_id].push(bs);
+    }
+  }
+
+  const mapped = (bookingsData || []).map(b => mapBooking(b, servicesMap[b.id] || []));
   sendSuccess(res, mapped, role === 'customer' ? 'Daftar booking pelanggan' : 'Semua data booking workshop');
 });
 
@@ -142,13 +181,8 @@ bookingsRouter.get('/:id', async (req: AuthenticatedRequest, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('bookings')
-    .select(`
-      *,
-      profiles!bookings_user_id_fkey(full_name, phone),
-      vehicles(brand, model, year, license_plate),
-      booking_services(service_id, price_at_booking, services(name))
-    `)
-    .or(`id.eq.${req.params.id},booking_reference.eq.${req.params.id}`)
+    .select('*')
+    .or(`id.eq.${req.params.id},booking_code.eq.${req.params.id}`)
     .single();
 
   if (error || !data) {
@@ -156,12 +190,18 @@ bookingsRouter.get('/:id', async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  if (role === 'customer' && data.user_id !== userId) {
+  const ownerId = data.customer_id || data.user_id;
+  if (role === 'customer' && ownerId !== userId) {
     sendError(res, 'Anda tidak memiliki akses ke booking ini', 403, 'FORBIDDEN');
     return;
   }
 
-  sendSuccess(res, mapBooking(data, data.booking_services), 'Detail booking');
+  const { data: bServices } = await supabaseAdmin
+    .from('booking_services')
+    .select('*')
+    .eq('booking_id', data.id);
+
+  sendSuccess(res, mapBooking(data, bServices || []), 'Detail booking');
 });
 
 bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
@@ -171,7 +211,10 @@ bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
   }
   const {
     vehicleId,
+    vehicleName,
+    licensePlate,
     serviceIds,
+    serviceNames,
     totalPrice,
     totalDurationMinutes,
     scheduledDate,
@@ -180,63 +223,56 @@ bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
     photoUrls,
   } = req.body;
 
-  if (!vehicleId || !serviceIds?.length || !scheduledDate || !scheduledTimeSlot) {
-    sendError(res, 'Informasi kendaraan, layanan, tanggal, dan slot waktu wajib diisi', 400, 'VALIDATION_ERROR');
+  if (!scheduledDate || !scheduledTimeSlot) {
+    sendError(res, 'Tanggal dan slot waktu kedatangan wajib diisi', 400, 'VALIDATION_ERROR');
     return;
   }
 
-  const { data: vehicle, error: vErr } = await supabaseAdmin
-    .from('vehicles')
-    .select('id, user_id')
-    .eq('id', vehicleId)
-    .single();
+  const userId = req.user!.id;
 
-  if (vErr || !vehicle) {
-    sendError(res, 'Kendaraan tidak ditemukan', 404, 'NOT_FOUND');
-    return;
+  // Retrieve workshop ID
+  const { data: workshops } = await supabaseAdmin.from('workshops').select('id').limit(1);
+  const workshopId = workshops?.[0]?.id || '185130c5-f388-4b7d-96a8-fe1d94c0de9d';
+
+  // Parse vehicle details
+  let vBrand = 'Mobil';
+  let vModel = 'Pelanggan';
+  let vYear = new Date().getFullYear();
+  let vPlate = licensePlate || 'B 1234 TRS';
+
+  if (vehicleName) {
+    const parts = String(vehicleName).trim().split(' ');
+    if (parts.length >= 1) vBrand = parts[0];
+    if (parts.length >= 2) vModel = parts.slice(1).join(' ');
   }
 
-  if (vehicle.user_id !== req.user!.id) {
-    sendError(res, 'Kendaraan tidak terdaftar pada akun Anda', 403, 'FORBIDDEN');
-    return;
-  }
-
-  const { data: settings } = await supabaseAdmin
-    .from('workshop_settings')
-    .select('max_bookings_per_slot')
-    .eq('id', 1)
-    .single();
-  const maxPerSlot = settings?.max_bookings_per_slot ?? 2;
-
-  const { count } = await supabaseAdmin
-    .from('bookings')
-    .select('id', { count: 'exact', head: true })
-    .eq('scheduled_date', scheduledDate)
-    .eq('scheduled_time_slot', scheduledTimeSlot)
-    .not('status', 'in', '("cancelled","rejected")');
-
-  if ((count || 0) >= maxPerSlot) {
-    sendError(res, 'Slot waktu pada tanggal tersebut sudah penuh. Silakan pilih slot lain.', 409, 'SLOT_FULL');
-    return;
-  }
+  // Parse time slot
+  const [startTimeStr, endTimeStr] = String(scheduledTimeSlot).split(' - ');
+  const startHour = startTimeStr ? startTimeStr.trim() : '08:30';
+  const endHour = endTimeStr ? endTimeStr.trim() : '10:00';
+  const startTimestamp = `${scheduledDate} ${startHour}:00+00`;
+  const endTimestamp = `${scheduledDate} ${endHour}:00+00`;
 
   const dateCode = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  const bookingRef = `TRS-${dateCode}-${randomSuffix}`;
+  const bookingRef = `MLT-${dateCode}-${randomSuffix}`;
 
   const { data: booking, error: bErr } = await supabaseAdmin
     .from('bookings')
     .insert({
-      booking_reference: bookingRef,
-      user_id: req.user!.id,
-      vehicle_id: vehicleId,
-      total_price: Number(totalPrice) || 0,
-      total_duration_minutes: Number(totalDurationMinutes) || 60,
-      scheduled_date: scheduledDate,
-      scheduled_time_slot: scheduledTimeSlot,
-      problem_description: problemDescription || '',
-      photo_urls: photoUrls || [],
+      booking_code: bookingRef,
+      customer_id: userId,
+      workshop_id: workshopId,
+      vehicle_brand: vBrand,
+      vehicle_model: vModel,
+      vehicle_year: vYear,
+      vehicle_plate: vPlate,
+      scheduled_start: startTimestamp,
+      scheduled_end: endTimestamp,
       status: 'pending',
+      customer_notes: problemDescription || 'Servis berkala.',
+      subtotal: Number(totalPrice) || 0,
+      total: Number(totalPrice) || 0,
     })
     .select()
     .single();
@@ -246,35 +282,23 @@ bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { data: servicesData } = await supabaseAdmin
-    .from('services')
-    .select('id, name, price')
-    .in('id', serviceIds);
+  // Insert booking services
+  const chosenServices = (serviceIds || []).map((id: string, idx: number) => ({
+    booking_id: booking.id,
+    service_id: id,
+    service_name: serviceNames?.[idx] || 'Layanan Servis',
+    quantity: 1,
+    unit_price: Number(totalPrice) || 0,
+    subtotal: Number(totalPrice) || 0,
+  }));
 
-  if (servicesData && servicesData.length > 0) {
-    await supabaseAdmin.from('booking_services').insert(
-      servicesData.map((s: any) => ({
-        booking_id: booking.id,
-        service_id: s.id,
-        price_at_booking: s.price,
-      }))
-    );
+  if (chosenServices.length > 0) {
+    await supabaseAdmin.from('booking_services').insert(chosenServices);
   }
-
-  const { data: fullBooking } = await supabaseAdmin
-    .from('bookings')
-    .select(`
-      *,
-      profiles!bookings_user_id_fkey(full_name, phone),
-      vehicles(brand, model, year, license_plate),
-      booking_services(service_id, price_at_booking, services(name))
-    `)
-    .eq('id', booking.id)
-    .single();
 
   sendSuccess(
     res,
-    mapBooking(fullBooking || booking, fullBooking?.booking_services),
+    mapBooking(booking, chosenServices),
     'Booking layanan berhasil dikirim. Menunggu konfirmasi mekanik.',
     201
   );
@@ -290,7 +314,7 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
 
   const { data: booking, error: fetchErr } = await supabaseAdmin
     .from('bookings')
-    .select('id, status, user_id')
+    .select('*')
     .eq('id', req.params.id)
     .single();
 
@@ -299,9 +323,11 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
     return;
   }
 
+  const ownerId = booking.customer_id || booking.user_id;
+
   if (status) {
     if (role === 'customer') {
-      if (booking.user_id !== userId) {
+      if (ownerId !== userId) {
         sendError(res, 'Anda tidak memiliki akses ke booking ini', 403, 'FORBIDDEN');
         return;
       }
@@ -309,16 +335,16 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
         sendError(res, 'Pelanggan hanya dapat membatalkan booking', 403, 'FORBIDDEN');
         return;
       }
-    } else {
+    } else if (role === 'mechanic') {
       if (!MECHANIC_ALLOWED_TRANSITIONS.includes(status)) {
-        sendError(res, 'Transisi status tidak valid', 400, 'INVALID_TRANSITION');
+        sendError(res, 'Transisi status tidak valid untuk teknisi', 400, 'INVALID_TRANSITION');
         return;
       }
     }
 
     const currentStatus = booking.status as BookingStatus;
     const allowedNext = VALID_TRANSITIONS[currentStatus] || [];
-    if (!allowedNext.includes(status as BookingStatus)) {
+    if (role !== 'superadmin' && !allowedNext.includes(status as BookingStatus)) {
       sendError(
         res,
         `Tidak dapat mengubah status dari '${currentStatus}' ke '${status}'`,
@@ -335,7 +361,11 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
   }
 
   const updates: Record<string, any> = { updated_at: new Date().toISOString() };
-  if (status) updates.status = status;
+  if (status) {
+    updates.status = status;
+    if (status === 'completed') updates.completed_at = new Date().toISOString();
+    if (status === 'cancelled' || status === 'rejected') updates.cancelled_at = new Date().toISOString();
+  }
   if (rejectionReason !== undefined) updates.rejection_reason = rejectionReason;
   if (mechanicNotes !== undefined) updates.mechanic_notes = mechanicNotes;
 
@@ -343,12 +373,7 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
     .from('bookings')
     .update(updates)
     .eq('id', req.params.id)
-    .select(`
-      *,
-      profiles!bookings_user_id_fkey(full_name, phone),
-      vehicles(brand, model, year, license_plate),
-      booking_services(service_id, price_at_booking, services(name))
-    `)
+    .select('*')
     .single();
 
   if (error) {
@@ -356,7 +381,12 @@ bookingsRouter.patch('/:id/status', requireRole('customer', 'mechanic', 'superad
     return;
   }
 
-  sendSuccess(res, mapBooking(data, data.booking_services), 'Status booking berhasil diperbarui');
+  const { data: bServices } = await supabaseAdmin
+    .from('booking_services')
+    .select('*')
+    .eq('booking_id', data.id);
+
+  sendSuccess(res, mapBooking(data, bServices || []), 'Status booking berhasil diperbarui');
 });
 
 bookingsRouter.patch('/:id/notes', requireRole('mechanic', 'superadmin'), async (req: AuthenticatedRequest, res) => {

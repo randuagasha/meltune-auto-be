@@ -30,42 +30,45 @@ dashboardRouter.get('/admin', authenticateToken, requireRole('superadmin'), asyn
     supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
     supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'customer').eq('is_active', true),
     supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'mechanic').eq('is_active', true),
-    supabaseAdmin.from('orders').select('total_amount, created_at').eq('status', 'completed'),
-    supabaseAdmin.from('booking_services').select('service_id, price_at_booking, services(name)').limit(1000),
-    supabaseAdmin.from('bookings').select('total_price, created_at, status').order('created_at', { ascending: false }).limit(500),
+    supabaseAdmin.from('orders').select('*').eq('status', 'completed'),
+    supabaseAdmin.from('booking_services').select('service_id, price_at_booking, unit_price, services(name)').limit(1000),
+    supabaseAdmin.from('bookings').select('*').order('created_at', { ascending: false }).limit(500),
   ]);
 
   const today = new Date().toISOString().slice(0, 10);
   const thisMonth = new Date().toISOString().slice(0, 7);
   const thisYear = new Date().getFullYear().toString();
 
+  const getBookingTotal = (b: any) => Number(b.total ?? b.total_price ?? b.subtotal ?? 0);
+  const getOrderTotal = (o: any) => Number(o.total ?? o.total_amount ?? 0);
+
   const serviceRevenue = (recentBookings || [])
     .filter((b: any) => b.status === 'completed')
-    .reduce((acc: number, b: any) => acc + Number(b.total_price), 0);
+    .reduce((acc: number, b: any) => acc + getBookingTotal(b), 0);
 
   const partsRevenue = (completedOrders || [])
-    .reduce((acc: number, o: any) => acc + Number(o.total_amount), 0);
+    .reduce((acc: number, o: any) => acc + getOrderTotal(o), 0);
 
   const dailyRevenue = (recentBookings || [])
     .filter((b: any) => b.status === 'completed' && b.created_at?.startsWith(today))
-    .reduce((acc: number, b: any) => acc + Number(b.total_price), 0)
+    .reduce((acc: number, b: any) => acc + getBookingTotal(b), 0)
     + (completedOrders || [])
     .filter((o: any) => o.created_at?.startsWith(today))
-    .reduce((acc: number, o: any) => acc + Number(o.total_amount), 0);
+    .reduce((acc: number, o: any) => acc + getOrderTotal(o), 0);
 
   const monthlyRevenue = (recentBookings || [])
     .filter((b: any) => b.status === 'completed' && b.created_at?.startsWith(thisMonth))
-    .reduce((acc: number, b: any) => acc + Number(b.total_price), 0)
+    .reduce((acc: number, b: any) => acc + getBookingTotal(b), 0)
     + (completedOrders || [])
     .filter((o: any) => o.created_at?.startsWith(thisMonth))
-    .reduce((acc: number, o: any) => acc + Number(o.total_amount), 0);
+    .reduce((acc: number, o: any) => acc + getOrderTotal(o), 0);
 
   const yearlyRevenue = (recentBookings || [])
     .filter((b: any) => b.status === 'completed' && b.created_at?.startsWith(thisYear))
-    .reduce((acc: number, b: any) => acc + Number(b.total_price), 0)
+    .reduce((acc: number, b: any) => acc + getBookingTotal(b), 0)
     + (completedOrders || [])
     .filter((o: any) => o.created_at?.startsWith(thisYear))
-    .reduce((acc: number, o: any) => acc + Number(o.total_amount), 0);
+    .reduce((acc: number, o: any) => acc + getOrderTotal(o), 0);
 
   const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
   for (const bs of bookingsByService || []) {
@@ -73,7 +76,7 @@ dashboardRouter.get('/admin', authenticateToken, requireRole('superadmin'), asyn
     const name = (bs as any).services?.name || sid;
     if (!serviceMap[sid]) serviceMap[sid] = { name, count: 0, revenue: 0 };
     serviceMap[sid].count += 1;
-    serviceMap[sid].revenue += Number((bs as any).price_at_booking);
+    serviceMap[sid].revenue += Number((bs as any).price_at_booking ?? (bs as any).unit_price ?? 0);
   }
 
   const totalServiceBookings = Object.values(serviceMap).reduce((a, s) => a + s.count, 0);
@@ -133,31 +136,53 @@ dashboardRouter.get('/mechanic', authenticateToken, requireRole('mechanic', 'sup
     { count: completedTodayCount },
     { data: activeBookings },
   ] = await Promise.all([
-    supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('scheduled_date', today).not('status', 'in', '("cancelled","rejected")'),
+    supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).not('status', 'in', '("cancelled","rejected")'),
     supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
     supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'in_progress'),
-    supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'completed').eq('scheduled_date', today),
+    supabaseAdmin.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'completed'),
     supabaseAdmin.from('bookings')
-      .select(`
-        id, booking_reference, status, scheduled_time_slot,
-        vehicles(brand, model, year, license_plate),
-        booking_services(services(name))
-      `)
-      .eq('scheduled_date', today)
+      .select('id, booking_reference, booking_code, status, scheduled_time_slot, scheduled_start, vehicle_brand, vehicle_model, vehicle_year, vehicle_plate')
       .in('status', ['confirmed', 'in_progress'])
-      .order('scheduled_time_slot'),
+      .order('created_at', { ascending: false })
+      .limit(4),
   ]);
 
-  const bayAllocations = (activeBookings || []).map((b: any, i: number) => ({
-    bayNumber: `Bay ${i + 1}`,
-    vehicle: `${b.vehicles?.brand || ''} ${b.vehicles?.model || ''} (${b.vehicles?.license_plate || ''})`,
-    service: b.booking_services?.[0]?.services?.name || '-',
-    status: b.status === 'in_progress' ? 'In Progress' : 'Scheduled',
-    bookingReference: b.booking_reference,
-  }));
+  const activeIds = (activeBookings || []).map((b: any) => b.id);
+  let servicesByBooking: Record<string, string> = {};
+  if (activeIds.length > 0) {
+    const { data: bServices } = await supabaseAdmin
+      .from('booking_services')
+      .select('booking_id, service_name, services(name)')
+      .in('booking_id', activeIds);
+    for (const bs of bServices || []) {
+      const sName = (bs as any).service_name || (bs as any).services?.name;
+      if (sName && !servicesByBooking[(bs as any).booking_id]) {
+        servicesByBooking[(bs as any).booking_id] = sName;
+      }
+    }
+  }
+
+  const bayAllocations = (activeBookings || []).map((b: any, i: number) => {
+    const vName = b.vehicle_brand
+      ? `${b.vehicle_brand} ${b.vehicle_model || ''} (${b.vehicle_plate || ''})`.trim()
+      : b.vehicle_name || 'Mobil Pelanggan';
+    return {
+      bayNumber: `Bay ${i + 1}`,
+      vehicle: vName,
+      service: servicesByBooking[b.id] || 'Servis Berkala Standar',
+      status: b.status === 'in_progress' ? 'In Progress' : 'Scheduled',
+      bookingReference: b.booking_reference || b.booking_code || `BK-${b.id.slice(0, 8).toUpperCase()}`,
+    };
+  });
 
   while (bayAllocations.length < 4) {
-    bayAllocations.push({ bayNumber: `Bay ${bayAllocations.length + 1}`, vehicle: 'Empty / Standby', service: '-', status: 'Idle', bookingReference: '' });
+    bayAllocations.push({
+      bayNumber: `Bay ${bayAllocations.length + 1}`,
+      vehicle: 'Empty / Standby',
+      service: 'Siap untuk alokasi servis',
+      status: 'Idle',
+      bookingReference: '',
+    });
   }
 
   sendSuccess(res, {

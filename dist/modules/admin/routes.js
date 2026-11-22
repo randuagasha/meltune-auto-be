@@ -22,29 +22,61 @@ exports.adminRouter.get('/customers', async (_req, res) => {
         return;
     }
     const customerIds = (data || []).map((p) => p.id);
-    const { data: vehicleCounts } = await supabase_js_1.supabaseAdmin
-        .from('vehicles')
-        .select('user_id')
-        .in('user_id', customerIds);
-    const { data: bookingCounts } = await supabase_js_1.supabaseAdmin
-        .from('bookings')
-        .select('user_id')
-        .in('user_id', customerIds);
-    const { data: loyaltyData } = await supabase_js_1.supabaseAdmin
-        .from('loyalty_accounts')
-        .select('user_id, points')
-        .in('user_id', customerIds);
+    let vehicleCounts = [];
+    try {
+        const { data: vData, error: vErr } = await supabase_js_1.supabaseAdmin
+            .from('vehicles')
+            .select('user_id')
+            .in('user_id', customerIds);
+        if (!vErr && vData) {
+            vehicleCounts = vData;
+        }
+    }
+    catch {
+        // table vehicles might not exist in postgres schema cache
+    }
+    let bookingCounts = [];
+    try {
+        const { data: bData } = await supabase_js_1.supabaseAdmin
+            .from('bookings')
+            .select('customer_id')
+            .in('customer_id', customerIds);
+        if (bData) {
+            bookingCounts = bData;
+        }
+    }
+    catch {
+        // ignore
+    }
+    let loyaltyData = [];
+    try {
+        const { data: lData } = await supabase_js_1.supabaseAdmin
+            .from('reward_accounts')
+            .select('customer_id, points')
+            .in('customer_id', customerIds);
+        if (lData) {
+            loyaltyData = lData;
+        }
+    }
+    catch {
+        // ignore
+    }
     const { data: authUsers } = await supabase_js_1.supabaseAdmin.auth.admin.listUsers();
     const mapped = (data || []).map((p) => {
         const authUser = authUsers?.users?.find((u) => u.id === p.id);
+        const metaVehicles = Array.isArray(authUser?.user_metadata?.vehicles) ? authUser.user_metadata.vehicles.length : 0;
+        const tableVehicles = (vehicleCounts || []).filter((v) => v.user_id === p.id).length;
+        const totalVehicles = tableVehicles > 0 ? tableVehicles : metaVehicles;
+        const totalBookings = (bookingCounts || []).filter((b) => b.customer_id === p.id).length;
+        const loyaltyPoints = (loyaltyData || []).find((l) => l.customer_id === p.id)?.points || 0;
         return {
             id: p.id,
             fullName: p.full_name,
             email: authUser?.email || '',
             phone: p.phone || '',
-            totalVehicles: (vehicleCounts || []).filter((v) => v.user_id === p.id).length,
-            totalBookings: (bookingCounts || []).filter((b) => b.user_id === p.id).length,
-            loyaltyPoints: (loyaltyData || []).find((l) => l.user_id === p.id)?.points || 0,
+            totalVehicles,
+            totalBookings,
+            loyaltyPoints,
             status: p.is_active ? 'active' : 'suspended',
             registeredAt: p.created_at,
         };

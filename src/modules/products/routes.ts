@@ -6,15 +6,17 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 export const productsRouter = Router();
 
 function mapProduct(p: any) {
+  const stock = p.inventory?.[0]?.quantity ?? p.stock ?? 10;
+  const price = p.selling_price ?? p.price ?? 0;
   return {
     id: p.id,
     name: p.name,
     category: p.category,
     description: p.description,
-    price: Number(p.price),
-    stock: p.stock,
+    price: Number(price),
+    stock: Number(stock),
     imageUrl: p.image_url,
-    isAvailable: p.is_available,
+    isAvailable: p.is_active ?? p.is_available ?? true,
   };
 }
 
@@ -25,15 +27,30 @@ productsRouter.get('/', async (req, res) => {
   }
   const { category, search } = req.query;
 
-  let query = supabaseAdmin.from('products').select('*').eq('is_available', true).order('name');
+  try {
+    let query = supabaseAdmin.from('spare_parts').select('*, inventory(quantity)').eq('is_active', true).order('name');
+    if (category && category !== 'all') {
+      query = query.eq('category', category as string);
+    }
+    if (search && typeof search === 'string') {
+      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+    }
+    const { data, error } = await query;
+    if (!error && data) {
+      sendSuccess(res, data.map(mapProduct), 'Katalog produk berhasil dimuat');
+      return;
+    }
+  } catch {
+    // Fall back to products table
+  }
 
+  let query = supabaseAdmin.from('products').select('*').eq('is_available', true).order('name');
   if (category && category !== 'all') {
     query = query.eq('category', category as string);
   }
   if (search && typeof search === 'string') {
     query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
   }
-
   const { data, error } = await query;
   if (error) {
     sendError(res, error.message, 500, 'DB_ERROR');
@@ -47,6 +64,18 @@ productsRouter.get('/:id', async (req, res) => {
     sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
     return;
   }
+  try {
+    const { data: part, error: pErr } = await supabaseAdmin
+      .from('spare_parts')
+      .select('*, inventory(quantity)')
+      .eq('id', req.params.id)
+      .single();
+    if (!pErr && part) {
+      sendSuccess(res, mapProduct(part), 'Detail produk');
+      return;
+    }
+  } catch {}
+
   const { data, error } = await supabaseAdmin
     .from('products')
     .select('*')

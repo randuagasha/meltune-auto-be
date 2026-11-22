@@ -6,12 +6,13 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 export const servicesRouter = Router();
 
 function mapService(s: any) {
+  const price = s.workshop_services?.[0]?.price ?? s.price ?? 0;
   return {
     id: s.id,
     name: s.name,
     category: s.category,
     description: s.description,
-    price: Number(s.price),
+    price: Number(price),
     estimatedDurationMinutes: s.estimated_duration_minutes,
     imageUrl: s.image_url,
     isActive: s.is_active,
@@ -25,7 +26,7 @@ servicesRouter.get('/', async (_req, res) => {
   }
   const { data, error } = await supabaseAdmin
     .from('services')
-    .select('*')
+    .select('*, workshop_services(price)')
     .eq('is_active', true)
     .order('name');
   if (error) {
@@ -42,7 +43,7 @@ servicesRouter.get('/:id', async (req, res) => {
   }
   const { data, error } = await supabaseAdmin
     .from('services')
-    .select('*')
+    .select('*, workshop_services(price)')
     .eq('id', req.params.id)
     .single();
   if (error || !data) {
