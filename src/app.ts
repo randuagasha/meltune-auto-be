@@ -18,7 +18,23 @@ import { dashboardRouter } from './modules/dashboard/routes.js';
 export const app = express();
 
 app.use(cors({
-  origin: [config.corsOrigin, 'http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: (origin, callback) => {
+    // Allow non-browser requests (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    // Allow dev localhost, LAN IPs (192.168.x.x, 10.x.x.x), Expo web (8081, 19006), and web frontend (3000)
+    if (
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.includes('192.168.') ||
+      origin.includes('10.0.') ||
+      origin.startsWith('exp://') ||
+      origin === config.corsOrigin
+    ) {
+      return callback(null, true);
+    }
+    // Permissive callback in development
+    return callback(null, true);
+  },
   credentials: true,
 }));
 
@@ -36,6 +52,16 @@ app.get('/health', (_req, res) => {
 });
 
 const v1Router = express.Router();
+
+v1Router.get('/health', (_req, res) => {
+  sendSuccess(res, {
+    status: 'online',
+    timestamp: new Date().toISOString(),
+    service: 'meltune-be',
+    version: '1.0.0',
+    environment: config.nodeEnv,
+  }, 'MELTUNE REST API Service Healthy');
+});
 v1Router.use('/auth', authRouter);
 v1Router.use('/vehicles', vehiclesRouter);
 v1Router.use('/services', servicesRouter);
@@ -52,8 +78,9 @@ app.use('/api/v1', v1Router);
 app.use(errorHandler);
 
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(config.port, () => {
-    console.log(`[MELTUNE Backend] REST API Server listening on port ${config.port}`);
-    console.log(`[MELTUNE Backend] API base: http://localhost:${config.port}/api/v1`);
+  const portNumber = Number(config.port) || 4000;
+  app.listen(portNumber, '0.0.0.0', () => {
+    console.log(`[MELTUNE Backend] REST API Server listening on 0.0.0.0:${portNumber}`);
+    console.log(`[MELTUNE Backend] API base: http://localhost:${portNumber}/api/v1`);
   });
 }

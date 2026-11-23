@@ -75,10 +75,10 @@ exports.dashboardRouter.get('/admin', auth_js_1.authenticateToken, (0, auth_js_1
         const monthStr = `${thisYear}-${String(i + 1).padStart(2, '0')}`;
         const sRev = (recentBookings || [])
             .filter((b) => b.status === 'completed' && b.created_at?.startsWith(monthStr))
-            .reduce((acc, b) => acc + Number(b.total_price), 0);
+            .reduce((acc, b) => acc + getBookingTotal(b), 0);
         const pRev = (completedOrders || [])
             .filter((o) => o.created_at?.startsWith(monthStr))
-            .reduce((acc, o) => acc + Number(o.total_amount), 0);
+            .reduce((acc, o) => acc + getOrderTotal(o), 0);
         return { month, serviceRevenue: sRev, partsRevenue: pRev };
     });
     (0, response_js_1.sendSuccess)(res, {

@@ -28,7 +28,7 @@ export const AVAILABLE_TIME_SLOTS = [
   '16:00 - 17:30',
 ];
 
-function mapBooking(b: any, services?: any[]) {
+function mapBooking(b: any, services?: any[], profile?: any) {
   const vName = b.vehicle_brand
     ? `${b.vehicle_brand} ${b.vehicle_model} ${b.vehicle_year || ''}`.trim()
     : b.vehicles
@@ -59,8 +59,8 @@ function mapBooking(b: any, services?: any[]) {
     id: b.id,
     bookingReference: b.booking_code || b.booking_reference || b.id,
     userId: b.customer_id || b.user_id,
-    userName: b.profiles?.full_name || b.user_name || 'Pelanggan',
-    userPhone: b.profiles?.phone || b.user_phone || '',
+    userName: profile?.full_name || b.profiles?.full_name || b.user_name || 'Pelanggan',
+    userPhone: profile?.phone || b.profiles?.phone || b.user_phone || '',
     vehicleId: b.vehicle_id || b.id,
     vehicleName: vName,
     licensePlate: vPlate,
@@ -154,21 +154,28 @@ bookingsRouter.get('/', async (req: AuthenticatedRequest, res) => {
   }
 
   const bookingIds = (bookingsData || []).map((b: any) => b.id);
+  const customerIds = Array.from(new Set((bookingsData || []).map((b: any) => b.customer_id).filter(Boolean)));
   let servicesMap: Record<string, any[]> = {};
+  let profilesMap: Record<string, any> = {};
 
   if (bookingIds.length > 0) {
-    const { data: bServices } = await supabaseAdmin
-      .from('booking_services')
-      .select('*')
-      .in('booking_id', bookingIds);
+    const [{ data: bServices }, { data: profs }] = await Promise.all([
+      supabaseAdmin.from('booking_services').select('*').in('booking_id', bookingIds),
+      customerIds.length > 0
+        ? supabaseAdmin.from('profiles').select('id, full_name, phone').in('id', customerIds)
+        : Promise.resolve({ data: [] }),
+    ]);
 
     for (const bs of bServices || []) {
       if (!servicesMap[bs.booking_id]) servicesMap[bs.booking_id] = [];
       servicesMap[bs.booking_id].push(bs);
     }
+    for (const p of profs || []) {
+      profilesMap[p.id] = p;
+    }
   }
 
-  const mapped = (bookingsData || []).map(b => mapBooking(b, servicesMap[b.id] || []));
+  const mapped = (bookingsData || []).map(b => mapBooking(b, servicesMap[b.id] || [], profilesMap[b.customer_id]));
   sendSuccess(res, mapped, role === 'customer' ? 'Daftar booking pelanggan' : 'Semua data booking workshop');
 });
 
@@ -196,12 +203,14 @@ bookingsRouter.get('/:id', async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { data: bServices } = await supabaseAdmin
-    .from('booking_services')
-    .select('*')
-    .eq('booking_id', data.id);
+  const [{ data: bServices }, { data: profile }] = await Promise.all([
+    supabaseAdmin.from('booking_services').select('*').eq('booking_id', data.id),
+    data.customer_id
+      ? supabaseAdmin.from('profiles').select('id, full_name, phone').eq('id', data.customer_id).single()
+      : Promise.resolve({ data: null }),
+  ]);
 
-  sendSuccess(res, mapBooking(data, bServices || []), 'Detail booking');
+  sendSuccess(res, mapBooking(data, bServices || [], profile), 'Detail booking');
 });
 
 bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
@@ -282,18 +291,36 @@ bookingsRouter.post('/', async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  // Insert booking services
-  const chosenServices = (serviceIds || []).map((id: string, idx: number) => ({
-    booking_id: booking.id,
-    service_id: id,
-    service_name: serviceNames?.[idx] || 'Layanan Servis',
-    quantity: 1,
-    unit_price: Number(totalPrice) || 0,
-    subtotal: Number(totalPrice) || 0,
-  }));
+  // Insert booking services with UUID validation
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const { data: dbServices } = await supabaseAdmin.from('services').select('id, name, is_active');
+  const defaultServiceId = dbServices?.[0]?.id || '697d2b7d-c4a0-43b1-9996-7fb92ee07416';
+
+  const chosenServices = (serviceIds || []).map((id: string, idx: number) => {
+    let finalServiceId = id;
+    let sName = serviceNames?.[idx] || 'Layanan Servis';
+
+    if (!UUID_REGEX.test(id)) {
+      const matched = (dbServices || []).find(s => s.name.toLowerCase() === sName.toLowerCase());
+      finalServiceId = matched?.id || defaultServiceId;
+      if (matched) sName = matched.name;
+    }
+
+    return {
+      booking_id: booking.id,
+      service_id: finalServiceId,
+      service_name: sName,
+      quantity: 1,
+      unit_price: Number(totalPrice) || 0,
+      subtotal: Number(totalPrice) || 0,
+    };
+  });
 
   if (chosenServices.length > 0) {
-    await supabaseAdmin.from('booking_services').insert(chosenServices);
+    const { error: bsErr } = await supabaseAdmin.from('booking_services').insert(chosenServices);
+    if (bsErr) {
+      console.error('Error inserting booking_services:', bsErr);
+    }
   }
 
   sendSuccess(

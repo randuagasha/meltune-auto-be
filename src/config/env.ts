@@ -1,4 +1,13 @@
 import dotenv from 'dotenv';
+import path from 'path';
+
+// In CommonJS, __dirname is available; also resolve from cwd
+const envPath = typeof __dirname !== 'undefined'
+  ? path.resolve(__dirname, '../../.env')
+  : path.resolve(process.cwd(), '.env');
+
+dotenv.config({ path: envPath });
+dotenv.config({ path: path.resolve(process.cwd(), 'meltune-be/.env') });
 dotenv.config();
 
 export const config = {

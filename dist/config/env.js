@@ -5,6 +5,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.config = void 0;
 const dotenv_1 = __importDefault(require("dotenv"));
+const path_1 = __importDefault(require("path"));
+// In CommonJS, __dirname is available; also resolve from cwd
+const envPath = typeof __dirname !== 'undefined'
+    ? path_1.default.resolve(__dirname, '../../.env')
+    : path_1.default.resolve(process.cwd(), '.env');
+dotenv_1.default.config({ path: envPath });
+dotenv_1.default.config({ path: path_1.default.resolve(process.cwd(), 'meltune-be/.env') });
 dotenv_1.default.config();
 exports.config = {
     port: process.env.PORT || 4000,

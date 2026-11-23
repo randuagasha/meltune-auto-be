@@ -24,7 +24,7 @@ exports.AVAILABLE_TIME_SLOTS = [
     '14:30 - 16:00',
     '16:00 - 17:30',
 ];
-function mapBooking(b, services) {
+function mapBooking(b, services, profile) {
     const vName = b.vehicle_brand
         ? `${b.vehicle_brand} ${b.vehicle_model} ${b.vehicle_year || ''}`.trim()
         : b.vehicles
@@ -46,8 +46,8 @@ function mapBooking(b, services) {
         id: b.id,
         bookingReference: b.booking_code || b.booking_reference || b.id,
         userId: b.customer_id || b.user_id,
-        userName: b.profiles?.full_name || b.user_name || 'Pelanggan',
-        userPhone: b.profiles?.phone || b.user_phone || '',
+        userName: profile?.full_name || b.profiles?.full_name || b.user_name || 'Pelanggan',
+        userPhone: profile?.phone || b.profiles?.phone || b.user_phone || '',
         vehicleId: b.vehicle_id || b.id,
         vehicleName: vName,
         licensePlate: vPlate,
@@ -127,19 +127,26 @@ exports.bookingsRouter.get('/', async (req, res) => {
         return;
     }
     const bookingIds = (bookingsData || []).map((b) => b.id);
+    const customerIds = Array.from(new Set((bookingsData || []).map((b) => b.customer_id).filter(Boolean)));
     let servicesMap = {};
+    let profilesMap = {};
     if (bookingIds.length > 0) {
-        const { data: bServices } = await supabase_js_1.supabaseAdmin
-            .from('booking_services')
-            .select('*')
-            .in('booking_id', bookingIds);
+        const [{ data: bServices }, { data: profs }] = await Promise.all([
+            supabase_js_1.supabaseAdmin.from('booking_services').select('*').in('booking_id', bookingIds),
+            customerIds.length > 0
+                ? supabase_js_1.supabaseAdmin.from('profiles').select('id, full_name, phone').in('id', customerIds)
+                : Promise.resolve({ data: [] }),
+        ]);
         for (const bs of bServices || []) {
             if (!servicesMap[bs.booking_id])
                 servicesMap[bs.booking_id] = [];
             servicesMap[bs.booking_id].push(bs);
         }
+        for (const p of profs || []) {
+            profilesMap[p.id] = p;
+        }
     }
-    const mapped = (bookingsData || []).map(b => mapBooking(b, servicesMap[b.id] || []));
+    const mapped = (bookingsData || []).map(b => mapBooking(b, servicesMap[b.id] || [], profilesMap[b.customer_id]));
     (0, response_js_1.sendSuccess)(res, mapped, role === 'customer' ? 'Daftar booking pelanggan' : 'Semua data booking workshop');
 });
 exports.bookingsRouter.get('/:id', async (req, res) => {
@@ -162,11 +169,13 @@ exports.bookingsRouter.get('/:id', async (req, res) => {
         (0, response_js_1.sendError)(res, 'Anda tidak memiliki akses ke booking ini', 403, 'FORBIDDEN');
         return;
     }
-    const { data: bServices } = await supabase_js_1.supabaseAdmin
-        .from('booking_services')
-        .select('*')
-        .eq('booking_id', data.id);
-    (0, response_js_1.sendSuccess)(res, mapBooking(data, bServices || []), 'Detail booking');
+    const [{ data: bServices }, { data: profile }] = await Promise.all([
+        supabase_js_1.supabaseAdmin.from('booking_services').select('*').eq('booking_id', data.id),
+        data.customer_id
+            ? supabase_js_1.supabaseAdmin.from('profiles').select('id, full_name, phone').eq('id', data.customer_id).single()
+            : Promise.resolve({ data: null }),
+    ]);
+    (0, response_js_1.sendSuccess)(res, mapBooking(data, bServices || [], profile), 'Detail booking');
 });
 exports.bookingsRouter.post('/', async (req, res) => {
     if (!supabase_js_1.supabaseAdmin) {
@@ -226,17 +235,33 @@ exports.bookingsRouter.post('/', async (req, res) => {
         (0, response_js_1.sendError)(res, bErr?.message || 'Gagal membuat booking', 500, 'DB_ERROR');
         return;
     }
-    // Insert booking services
-    const chosenServices = (serviceIds || []).map((id, idx) => ({
-        booking_id: booking.id,
-        service_id: id,
-        service_name: serviceNames?.[idx] || 'Layanan Servis',
-        quantity: 1,
-        unit_price: Number(totalPrice) || 0,
-        subtotal: Number(totalPrice) || 0,
-    }));
+    // Insert booking services with UUID validation
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const { data: dbServices } = await supabase_js_1.supabaseAdmin.from('services').select('id, name, is_active');
+    const defaultServiceId = dbServices?.[0]?.id || '697d2b7d-c4a0-43b1-9996-7fb92ee07416';
+    const chosenServices = (serviceIds || []).map((id, idx) => {
+        let finalServiceId = id;
+        let sName = serviceNames?.[idx] || 'Layanan Servis';
+        if (!UUID_REGEX.test(id)) {
+            const matched = (dbServices || []).find(s => s.name.toLowerCase() === sName.toLowerCase());
+            finalServiceId = matched?.id || defaultServiceId;
+            if (matched)
+                sName = matched.name;
+        }
+        return {
+            booking_id: booking.id,
+            service_id: finalServiceId,
+            service_name: sName,
+            quantity: 1,
+            unit_price: Number(totalPrice) || 0,
+            subtotal: Number(totalPrice) || 0,
+        };
+    });
     if (chosenServices.length > 0) {
-        await supabase_js_1.supabaseAdmin.from('booking_services').insert(chosenServices);
+        const { error: bsErr } = await supabase_js_1.supabaseAdmin.from('booking_services').insert(chosenServices);
+        if (bsErr) {
+            console.error('Error inserting booking_services:', bsErr);
+        }
     }
     (0, response_js_1.sendSuccess)(res, mapBooking(booking, chosenServices), 'Booking layanan berhasil dikirim. Menunggu konfirmasi mekanik.', 201);
 });

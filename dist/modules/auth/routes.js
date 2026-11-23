@@ -12,7 +12,7 @@ exports.authRouter.get('/me', auth_js_1.authenticateToken, (req, res) => {
 exports.authRouter.post('/logout', auth_js_1.authenticateToken, (_req, res) => {
     (0, response_js_1.sendSuccess)(res, { loggedOut: true }, 'Successfully logged out');
 });
-exports.authRouter.post('/profile', auth_js_1.authenticateToken, async (req, res) => {
+const handleUpdateProfile = async (req, res) => {
     if (!supabase_js_1.supabaseAdmin) {
         (0, response_js_1.sendError)(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
         return;
@@ -33,6 +33,22 @@ exports.authRouter.post('/profile', auth_js_1.authenticateToken, async (req, res
         (0, response_js_1.sendError)(res, error.message, 500, 'DB_ERROR');
         return;
     }
+    // Also sync with auth.users user_metadata for persistent auth sessions
+    try {
+        const { data: userRecord } = await supabase_js_1.supabaseAdmin.auth.admin.getUserById(req.user.id);
+        if (userRecord?.user) {
+            await supabase_js_1.supabaseAdmin.auth.admin.updateUserById(req.user.id, {
+                user_metadata: {
+                    ...userRecord.user.user_metadata,
+                    full_name: fullName !== undefined ? fullName : userRecord.user.user_metadata?.full_name,
+                    phone: phone !== undefined ? phone : userRecord.user.user_metadata?.phone,
+                },
+            });
+        }
+    }
+    catch (metaErr) {
+        console.warn('Failed to sync auth user_metadata:', metaErr);
+    }
     (0, response_js_1.sendSuccess)(res, {
         id: data.id,
         fullName: data.full_name,
@@ -41,4 +57,7 @@ exports.authRouter.post('/profile', auth_js_1.authenticateToken, async (req, res
         isActive: data.is_active,
         createdAt: data.created_at,
     }, 'Profil berhasil diperbarui');
-});
+};
+exports.authRouter.post('/profile', auth_js_1.authenticateToken, handleUpdateProfile);
+exports.authRouter.put('/profile', auth_js_1.authenticateToken, handleUpdateProfile);
+exports.authRouter.patch('/profile', auth_js_1.authenticateToken, handleUpdateProfile);

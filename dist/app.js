@@ -21,7 +21,22 @@ const routes_js_9 = require("./modules/admin/routes.js");
 const routes_js_10 = require("./modules/dashboard/routes.js");
 exports.app = (0, express_1.default)();
 exports.app.use((0, cors_1.default)({
-    origin: [env_js_1.config.corsOrigin, 'http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: (origin, callback) => {
+        // Allow non-browser requests (mobile apps, curl, Postman)
+        if (!origin)
+            return callback(null, true);
+        // Allow dev localhost, LAN IPs (192.168.x.x, 10.x.x.x), Expo web (8081, 19006), and web frontend (3000)
+        if (origin.includes('localhost') ||
+            origin.includes('127.0.0.1') ||
+            origin.includes('192.168.') ||
+            origin.includes('10.0.') ||
+            origin.startsWith('exp://') ||
+            origin === env_js_1.config.corsOrigin) {
+            return callback(null, true);
+        }
+        // Permissive callback in development
+        return callback(null, true);
+    },
     credentials: true,
 }));
 exports.app.use(express_1.default.json({ limit: '10mb' }));
@@ -36,6 +51,15 @@ exports.app.get('/health', (_req, res) => {
     }, 'MELTUNE REST API Service Healthy');
 });
 const v1Router = express_1.default.Router();
+v1Router.get('/health', (_req, res) => {
+    (0, response_js_1.sendSuccess)(res, {
+        status: 'online',
+        timestamp: new Date().toISOString(),
+        service: 'meltune-be',
+        version: '1.0.0',
+        environment: env_js_1.config.nodeEnv,
+    }, 'MELTUNE REST API Service Healthy');
+});
 v1Router.use('/auth', routes_js_1.authRouter);
 v1Router.use('/vehicles', routes_js_2.vehiclesRouter);
 v1Router.use('/services', routes_js_3.servicesRouter);
@@ -49,8 +73,9 @@ v1Router.use('/dashboard', routes_js_10.dashboardRouter);
 exports.app.use('/api/v1', v1Router);
 exports.app.use(error_js_1.errorHandler);
 if (process.env.NODE_ENV !== 'test') {
-    exports.app.listen(env_js_1.config.port, () => {
-        console.log(`[MELTUNE Backend] REST API Server listening on port ${env_js_1.config.port}`);
-        console.log(`[MELTUNE Backend] API base: http://localhost:${env_js_1.config.port}/api/v1`);
+    const portNumber = Number(env_js_1.config.port) || 4000;
+    exports.app.listen(portNumber, '0.0.0.0', () => {
+        console.log(`[MELTUNE Backend] REST API Server listening on 0.0.0.0:${portNumber}`);
+        console.log(`[MELTUNE Backend] API base: http://localhost:${portNumber}/api/v1`);
     });
 }

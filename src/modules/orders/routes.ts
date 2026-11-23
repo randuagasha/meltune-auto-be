@@ -119,14 +119,34 @@ ordersRouter.post('/', async (req: AuthenticatedRequest, res) => {
       return;
     }
 
-    const itemsToInsert = items.map((i: any) => ({
-      order_id: order.id,
-      spare_part_id: i.productId,
-      product_name: i.productName || 'Suku Cadang',
-      quantity: Number(i.quantity) || 1,
-      unit_price: Number(i.price) || 0,
-      subtotal: (Number(i.price) || 0) * (Number(i.quantity) || 1),
-    }));
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const { data: dbParts } = await supabaseAdmin.from('spare_parts').select('id, name, sku');
+    const defaultPartId = dbParts?.[0]?.id || '82511259-23b3-46b4-8a43-d832c5579df5';
+
+    const itemsToInsert = items.map((i: any) => {
+      let finalPartId = i.productId;
+      let pName = i.productName || 'Suku Cadang';
+      let pSku = i.sku || null;
+
+      if (!UUID_REGEX.test(finalPartId)) {
+        const matched = (dbParts || []).find(p => p.name.toLowerCase() === pName.toLowerCase() || p.sku === i.productId);
+        finalPartId = matched?.id || defaultPartId;
+        if (matched) {
+          pName = matched.name;
+          pSku = matched.sku;
+        }
+      }
+
+      return {
+        order_id: order.id,
+        spare_part_id: finalPartId,
+        product_name: pName,
+        sku: pSku,
+        quantity: Number(i.quantity) || 1,
+        unit_price: Number(i.price) || 0,
+        subtotal: (Number(i.price) || 0) * (Number(i.quantity) || 1),
+      };
+    });
 
     await supabaseAdmin.from('order_items').insert(itemsToInsert);
 

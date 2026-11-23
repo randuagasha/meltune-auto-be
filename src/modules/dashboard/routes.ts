@@ -95,10 +95,10 @@ dashboardRouter.get('/admin', authenticateToken, requireRole('superadmin'), asyn
     const monthStr = `${thisYear}-${String(i + 1).padStart(2, '0')}`;
     const sRev = (recentBookings || [])
       .filter((b: any) => b.status === 'completed' && b.created_at?.startsWith(monthStr))
-      .reduce((acc: number, b: any) => acc + Number(b.total_price), 0);
+      .reduce((acc: number, b: any) => acc + getBookingTotal(b), 0);
     const pRev = (completedOrders || [])
       .filter((o: any) => o.created_at?.startsWith(monthStr))
-      .reduce((acc: number, o: any) => acc + Number(o.total_amount), 0);
+      .reduce((acc: number, o: any) => acc + getOrderTotal(o), 0);
     return { month, serviceRevenue: sRev, partsRevenue: pRev };
   });
 

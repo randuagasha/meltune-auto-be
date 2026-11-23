@@ -13,7 +13,7 @@ authRouter.post('/logout', authenticateToken, (_req, res) => {
   sendSuccess(res, { loggedOut: true }, 'Successfully logged out');
 });
 
-authRouter.post('/profile', authenticateToken, async (req: AuthenticatedRequest, res) => {
+const handleUpdateProfile = async (req: AuthenticatedRequest, res: any) => {
   if (!supabaseAdmin) {
     sendError(res, 'Database service not available', 503, 'DB_UNAVAILABLE');
     return;
@@ -35,6 +35,22 @@ authRouter.post('/profile', authenticateToken, async (req: AuthenticatedRequest,
     return;
   }
 
+  // Also sync with auth.users user_metadata for persistent auth sessions
+  try {
+    const { data: userRecord } = await supabaseAdmin.auth.admin.getUserById(req.user!.id);
+    if (userRecord?.user) {
+      await supabaseAdmin.auth.admin.updateUserById(req.user!.id, {
+        user_metadata: {
+          ...userRecord.user.user_metadata,
+          full_name: fullName !== undefined ? fullName : userRecord.user.user_metadata?.full_name,
+          phone: phone !== undefined ? phone : userRecord.user.user_metadata?.phone,
+        },
+      });
+    }
+  } catch (metaErr) {
+    console.warn('Failed to sync auth user_metadata:', metaErr);
+  }
+
   sendSuccess(res, {
     id: data.id,
     fullName: data.full_name,
@@ -43,4 +59,8 @@ authRouter.post('/profile', authenticateToken, async (req: AuthenticatedRequest,
     isActive: data.is_active,
     createdAt: data.created_at,
   }, 'Profil berhasil diperbarui');
-});
+};
+
+authRouter.post('/profile', authenticateToken, handleUpdateProfile);
+authRouter.put('/profile', authenticateToken, handleUpdateProfile);
+authRouter.patch('/profile', authenticateToken, handleUpdateProfile);
